@@ -1,0 +1,196 @@
+---
+title: "TP53 variants and p53 IHC comparison"
+author: "Elena Díaz"
+date: "2026-03-18"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+## Custom functions in this notebook
+
+No custom functions are defined in this notebook. It uses
+`save_flextable_docx()` from `1_2_upload_and_initial_sample_checks.Rmd` to
+export selected result tables.
+
+## How to run
+
+This report expects the following objects to already exist in the R environment:
+
+- `list_analyzed`: filtered variant table 
+- `oncomine_followup`: clinical REDCap table 
+- `tumor_not_passing_samples`: tumor samples excluded before IHC comparison
+- `patient_hpv`: patient/sample HPV table 
+
+No extra input files are loaded directly in this notebook.
+
+## Objective
+
+The aim of this analysis is to assess whether tumor samples carrying **TP53
+variants** in the sequencing data also show an altered **p53
+immunohistochemistry (IHC)** pattern in the clinical follow-up table.
+
+The workflow is divided into four main steps:
+
+1.  Build an IHC table from `oncomine_followup`.
+2.  Keep only tumor samples from `list_analyzed`.
+3.  Classify tumor samples into **TP53-mut** and **TP53-wt** groups.
+4.  Merge both groups with the IHC and HPV information.
+
+Premalignant samples are not used here because they do not have IHC data.
+Tumor matching key: `sample_id` in `list_analyzed` maps to `id_tumoral` in
+`oncomine_followup`.
+
+```{r}
+# Restrict the filtered variant table to tumor samples for the IHC comparison.
+list_analyzed_tumor <- list_analyzed %>%
+  filter(tissue_type =="tumor")
+```
+
+#### Create IHC Table
+
+Create a simplified IHC table using tumor sample ID and p53 IHC pattern.
+
+```{r}
+# Build a tumor-level table with simplified p53 IHC status labels.
+ihc_table <- oncomine_followup %>%
+  filter(!is.na(filenames_tumoral)) %>%
+  select(id_tumoral, p53_ihc_status) %>%
+  mutate(
+    p53_ihc_status = case_when(
+      p53_ihc_status == "Wt" ~ "p53-wt",
+      p53_ihc_status == "Mutant" ~ "p53-ab",
+      TRUE ~ NA_character_
+    )
+  )
+# Remove tumor samples that failed filtering before comparing with variants.
+ihc_table <- ihc_table %>%
+  filter(!id_tumoral %in% tumor_not_passing_samples)
+```
+
+## Identify TP53-mut & TP53-wt samples
+
+First, all rows corresponding to **TP53 variants** and **tumor tissue** are
+extracted from `list_analyzed` and stored in samples_tp53mut
+
+Second, samples considered **TP53-wt** when `sample_id` is tumor and 
+appears in `metadata_passing` but absent from the TP53-mut set. 
+
+```{r tp53-mutated-table}
+# Extract tumor variants in TP53.
+tp53mut <- list_analyzed_tumor %>%
+  filter(gene == "TP53")
+
+# Tumor samples with TP53 variants.
+samples_tp53mut <- unique(tp53mut$sample_id)
+
+# Get all tumor samples that passed the initial QC filters.
+metadata_passing_tumor_id <- metadata_passing %>%
+  filter(.data[[tissue_col]] == "tumor") %>%
+  pull(Sample_ID)
+
+# Tumor samples without TP53 variants.
+samples_tp53wt <- setdiff(metadata_passing_tumor_id, samples_tp53mut)
+```
+
+```{r}
+# Print sample counts and IDs for the TP53-mutated and TP53-wild-type groups.
+cat("Total tumor samples:", length(metadata_passing_tumor_id), "\n")
+
+cat("Number of TP53 variants (tumor tissue) in filtered_variants:", nrow(tp53mut), "\n")
+cat("Number of unique samples with TP53 variants (tumor tissue):", n_distinct(tp53mut$sample_id), "\n")
+cat("Unique sample IDs with TP53 variants (tumor tissue):\n")
+print(samples_tp53mut)
+
+cat("Total tumor samples without TP53 mutation:", length(samples_tp53wt), "\n")
+cat("Unique sample IDs without TP53 variants (tumor tissue):\n")
+print(unique(samples_tp53wt))
+```
+## Merge TP53 status info with p53 status info
+```{r}
+# Assign sequencing-derived TP53 status to each tumor sample in the IHC table.
+ihc_genetics <- ihc_table %>%
+  mutate(
+    tp53_status = case_when(
+      id_tumoral %in% samples_tp53wt  ~ "TP53-wt",
+      id_tumoral %in% samples_tp53mut ~ "TP53-mut",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  rename(
+    `Tumor Sample ID` = id_tumoral,
+    `p53 IHC Status` = p53_ihc_status,
+    `TP53 Status` = tp53_status
+  )
+ihc_genetics
+```
+ Discordant samples should be reviewed with additional variant annotation
+sources, such as ClinVar, before drawing biological conclusions, so if filtering strategy could be enhanced.
+
+```{r}
+# Summarize concordance between p53 IHC status and TP53 variant status.
+ihc_genetics %>%
+  count(`p53 IHC Status`, `TP53 Status`)
+```
+
+#### Fisher Test
+
+The contingency matrix is built directly from `ihc_genetics`: rows are IHC
+groups and columns are TP53 variant groups.
+
+```{r}
+# Build the 2x2 contingency table for Fisher's exact test.
+mat <- table(
+  factor(ihc_genetics$`p53 IHC Status`, levels = c("p53-ab", "p53-wt")),
+  factor(ihc_genetics$`TP53 Status`, levels = c("TP53-mut", "TP53-wt"))
+)
+
+rownames(mat) <- c("p53-ab", "p53-wt")
+colnames(mat) <- c("TP53-mut", "TP53-wt")
+
+mat
+fisher.test(mat)
+
+# Export the contingency table for reporting.
+save_flextable_docx(mat, "tp53_ihc_contingency_table")
+```
+
+#### Add HPV Status, p53_ihc_pattern, study_id
+```{r}
+# Add patient, HPV, and detailed IHC pattern fields from the clinical table.
+ihc_genetics_complete <- ihc_genetics %>%
+  left_join(
+    oncomine_followup %>%
+      select(id_tumoral, study_id, hpv_status, p53_ihc_patt ) %>%
+      distinct(id_tumoral, .keep_all = TRUE),
+    by = c("Tumor Sample ID" = "id_tumoral")
+  )
+
+# Reorder and rename fields for a readable output table.
+ihc_genetics_complete <- ihc_genetics_complete %>%
+  select(study_id, `Tumor Sample ID`, `p53 IHC Status`, `TP53 Status`, hpv_status, p53_ihc_patt) %>%
+  rename(
+    "Study ID"                = study_id,
+    "HPV Status"              = hpv_status,
+    "p53 IHC Pattern (short)" = p53_ihc_patt
+  )
+
+ihc_genetics_complete
+
+save_flextable_docx(ihc_genetics_complete, "ihc_genetics_complete")
+```
+
+```{r}
+# Count HPV-associated and HPV-independent tumors in the final filtered table.
+cat( "In filtered samples, HPV+:",
+  sum(ihc_genetics_complete$`HPV Status` == "Associated", na.rm = TRUE),
+  "\n")
+
+cat("In filtered samples, HPV-:",
+  sum(ihc_genetics_complete$`HPV Status` == "Independent", na.rm = TRUE),
+  "\n")
+```

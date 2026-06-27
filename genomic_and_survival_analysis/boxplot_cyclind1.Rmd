@@ -1,0 +1,82 @@
+---
+title: "Cyclin D1 IHC Boxplot"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Custom functions used in this notebook
+
+No custom functions are defined in this notebook. It uses `clinical_for_maf`,
+which is created upstream, to summarize and compare Cyclin D1 IHC percentages
+across HPV/TP53 groups.
+
+# Workflow overview
+
+This notebook summarizes Cyclin D1 IHC percentages by
+`HPV_TP53_mutational_group`, plots the group distributions, and runs global and
+pairwise non-parametric tests.
+
+#clinical_for_maf data
+We only use HPV_TP53_mutational group and cyclind1_ihc_perc
+
+```{r cyclind1-summary}
+# Summarize Cyclin D1 IHC percentages within each HPV/TP53 group.
+clinical_for_maf %>%
+  group_by(HPV_TP53_mutational_group) %>%
+  summarise(
+    n = n(),
+    median = median(cyclind1_ihc_perc),
+    q1 = quantile(cyclind1_ihc_perc, 0.25),
+    q3 = quantile(cyclind1_ihc_perc, 0.75),
+    min = min(cyclind1_ihc_perc),
+    max = max(cyclind1_ihc_perc),
+    .groups = "drop"
+  )
+```
+
+```{r cyclind1-boxplot, fig.width=6, fig.height=4, dpi=300}
+# Plot Cyclin D1 IHC percentages by HPV/TP53 group.
+ccd1_ihc_by_hpvtp53groups <- ggplot(clinical_for_maf, aes(x = HPV_TP53_mutational_group, y = cyclind1_ihc_perc, fill = HPV_TP53_mutational_group)) +
+  geom_boxplot(outlier.shape = NA, width = 0.55, alpha = 0.75) +
+  geom_jitter(width = 0.12, size = 2, alpha = 0.85, shape = 21, color = "grey20") +
+  scale_fill_manual(
+    values = c(
+      "HPV-I/TP53wt" = "#009E73",
+      "HPV-I/TP53mut" = "#E69F00",
+      "HPV-A" = "#377EB8"
+    )
+  ) +
+  scale_y_continuous(breaks = seq(0, 100, 25), limits = c(0, 100)) +
+  labs(
+    x = NULL,
+    y = "Cyclin D1 IHC (%)",
+    title = "Cyclin D1 IHC by HPV/TP53 group"
+  ) +
+  theme_classic(base_size = 12) +
+  theme(
+    legend.position = "none",
+    plot.title = element_text(face = "bold", hjust = 0.5)
+  )
+
+ccd1_ihc_by_hpvtp53groups
+```
+
+```{r cyclind1-kruskal}
+# Test for global Cyclin D1 IHC differences across HPV/TP53 groups.
+ccdn1_kruskal <- kruskal.test(cyclind1_ihc_perc ~ HPV_TP53_mutational_group, data = clinical_for_maf)
+ccdn1_kruskal
+```
+
+```{r cyclind1-pairwise-wilcox}
+# Run pairwise Wilcoxon comparisons with BH-adjusted p-values.
+ccdn1_wilcox <- pairwise.wilcox.test(
+  x = clinical_for_maf$cyclind1_ihc_perc,
+  g = clinical_for_maf$HPV_TP53_mutational_group,
+  p.adjust.method = "BH",
+  exact = FALSE
+)
+ccdn1_wilcox
+```

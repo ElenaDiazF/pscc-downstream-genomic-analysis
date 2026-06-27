@@ -1,0 +1,200 @@
+---
+title: "more_metrics_maf"
+author: "Elena Díaz"
+date: "2026-05-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Custom functions used in this notebook
+
+No custom functions are defined in this notebook. It uses objects and helper
+functions created upstream:
+
+- `maf_tumor`: tumor-only MAF object used for mutation metrics.
+- `clinical_for_maf`: tumor clinical annotation table used for group summaries.
+- `list_analyzed`: filtered variant table used for gene and HGVS counts.
+- `save_flextable_docx()`: exports metric tables as Word documents.
+
+## Workflow overview
+
+This notebook calculates tumor mutation burden, mutation count summaries,
+variant recurrence metrics, variant class counts, SNV substitution classes, and
+top mutated genes for the tumor MAF object.
+
+#TMB Calculations
+Notes:
+- Capture Size: defines the genomic length covered by your sequencing panel in megabases (using the KAPA HyperExome capture target size of 43 Mb). 
+- Variant Type: TMB calculations typically include only non-synonymous mutations (like missense and nonsense variants), while silent/synonymous mutations are often excluded.
+- Median Cutoff: Stratify patient cohorts into "TMB-High" (above the median) and "TMB-Low" (at or below the median) groups for immunotherapy response analysis
+
+```{r}
+# Estimate tumor mutation burden using the tumor-only MAF object.
+#for tumor
+# 1. Load or read your MAF object 
+# 2. Estimate TMB (default capture size for exome-seq is 50 Mb)
+tmb_table <- tmb(maf = maf_tumor, captureSize = 43, logScale = FALSE)
+tmb_table
+
+# Summarize the cohort-level median TMB.
+# 3. Calculate the median TMB value
+median_tmb <- median(tmb_table$total_per_MB)
+
+print(median_tmb)
+
+```
+
+```{r}
+# Join TMB values to clinical annotations for group-level comparisons.
+#tmb differences in HPV_tP53_mutational_group
+tmb_with_clinical <- tmb_table %>%
+  inner_join(clinical_for_maf, by = "Tumor_Sample_Barcode")
+
+# Calculate median TMB and sample counts by HPV/TP53 group.
+median_per_group <- tmb_with_clinical %>%
+  group_by(HPV_TP53_mutational_group) %>%
+  summarise(
+    Median_TMB = median(total_perMB, na.rm = TRUE),
+    Sample_Count = n()
+  )
+
+print(median_per_group)
+
+# Test TMB differences across the three HPV/TP53 groups.
+# Test de Kruskal-Wallis para 3 grupos
+test_global <- kruskal.test(total_perMB ~ HPV_TP53_mutational_group, data = tmb_with_clinical)
+
+# Mostrar el p-valor global
+print(test_global$p.value)
+
+# Test TMB differences between HPV-associated and HPV-independent tumors.
+#Comparison per two groups HPV
+test_results_hpv <- wilcox.test(total_perMB ~ hpv_status, data = tmb_with_clinical)
+
+print(test_results_hpv$p.value)
+```
+no group significant
+
+# extract all somatic mutations
+```{r}
+# Summarize the tumor MAF and extract per-sample mutation counts.
+plotmafSummary(maf = maf_tumor) #general
+sample_summary <- getSampleSummary(maf_tumor)
+
+# Calculate the mean and observed range of somatic mutations per tumor.
+mean_mutations <- mean(sample_summary$total)
+range_mutations <- range(sample_summary$total)
+
+cat(paste0("The mean number of somatic mutations detected per tumor was ", 
+           round(mean_mutations, 2), 
+           " (range, ", range_mutations[1], "-", range_mutations[2], ")\n"))
+```
+
+#genes in filtered_variants
+```{r}
+# Count unique mutated genes among tumor samples in the filtered variant table.
+#n of unique genes in all filtered_Variants of tumor
+list_analyzed %>%
+  filter(tissue_type == "tumor") %>%
+  pull(gene) %>%
+  unique() %>%
+  length()
+
+# Count how many tumor samples contain variants in each gene.
+gene_counts <- list_analyzed %>%
+  filter(tissue_type == "tumor") %>%
+  count(gene, name = "n_samples")
+
+gene_counts %>%
+  count(n_samples, name = "n_genes") %>%
+  arrange(n_samples)
+```
+
+# Count how many times each HGVS coding variant appears across the dataset
+```{r}
+# Count each coding HGVS variant once per sample.
+hgvs_counts <- list_analyzed %>%
+  filter(tissue_type == "tumor") %>%
+  filter(!is.na(hgvs_c), hgvs_c != "") %>%
+  distinct(sample_id, hgvs_c) %>%
+  count(hgvs_c, name = "n_samples")
+
+# Classify coding variants as unique or recurrent across samples.
+hgvs_counts %>%
+  mutate(type = ifelse(n_samples == 1, "Unique", "Recurrent")) %>%
+  count(type) %>%
+  mutate(percent = round(100 * n / sum(n), 1))
+```
+
+#nucleotide changes by ai (maybe simpler possible)
+```{r}
+# Count maftools variant classifications in the tumor MAF.
+# Variant_Classification class counts
+variant_classification_counts <- maf_tumor@data %>%
+  count(Variant_Classification, sort = TRUE)
+variant_classification_counts
+
+# Count broad variant types in the tumor MAF.
+# Variant_Type class counts
+variant_type_counts <- maf_tumor@data %>%
+  count(Variant_Type, sort = TRUE)
+variant_type_counts
+
+# Export variant class and type count tables.
+save_flextable_docx(variant_classification_counts, "variant_classification_counts")
+save_flextable_docx(variant_type_counts, "variant_type_counts")
+```
+
+```{r}
+# Create normalized SNV substitution classes from reference and alternate alleles.
+# SNV class counts, IT DOES NOT Exit. Create from ref and alt. Only for SNPs
+maf_tumor@data <- maf_tumor@data %>%
+  mutate(
+    SNV_Class = paste0(ref, ">", alt),
+
+    # Normalize complementary substitutions to pyrimidine context
+    SNV_Class_norm = recode(
+      SNV_Class,
+      "G>A" = "C>T",
+      "A>G" = "T>C",
+      "G>C" = "C>G",
+      "A>C" = "T>G",
+      "G>T" = "C>A",
+      "A>T" = "T>A",
+      .default = SNV_Class
+    )
+  )
+
+# Count normalized SNP substitution classes and calculate percentages.
+# Count normalized SNP classes
+snv_class_counts <- maf_tumor@data %>%
+  count(SNV_Class_norm, sort = TRUE) %>%
+  filter(nchar(SNV_Class_norm) == 3) %>%
+  mutate(
+    percentage = round(100 * n / sum(n), 2)
+  )
+
+# Export normalized SNV substitution counts.
+save_flextable_docx(snv_class_counts, "snv_class_counts")
+```
+
+Study the most mutated genes (by total variants, and total samples affecting)
+- Hugo_Symbol: Name of gene
+- MutatedSamples: Number of patients/samples in whcih gene is mutated.
+- total: Total number of mutational events in that gene (equal/higher to mutated samples)
+```{r}
+# Extract the most frequently mutated genes by total mutation events.
+#table for top 10 mutated genes. Cols: genes, total variants, unique per sample
+top_genes_table <- getGeneSummary(maf_tumor) %>%
+  select(Hugo_Symbol, MutatedSamples, total) %>%
+  arrange(desc(total)) %>%
+  head(20) 
+
+top_genes_table
+
+# Export the top mutated genes table.
+save_flextable_docx(top_genes_table, "top_mutated_genes")
+```

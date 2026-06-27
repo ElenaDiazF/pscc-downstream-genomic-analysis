@@ -1,0 +1,363 @@
+---
+title: "Oncoplot Generation"
+author: "Elena Díaz"
+date: "2026-05-11"
+output: html_document
+---
+
+## Custom functions used in this notebook
+
+No custom functions are defined in this notebook. It uses helper objects and
+functions created upstream:
+
+- `top_genes()`: selects the most frequently mutated genes from a MAF object.
+- `get_ordered_genes()`: returns genes in the order used for grouped tumor
+  oncoplots.
+- `save_flextable_docx()`: exports comparison tables as Word documents.
+
+## Workflow overview
+
+This notebook generates summary plots, oncoplots, group comparisons, and final
+MAF exports from the MAF objects prepared in `4maf_obj_creation.Rmd`.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r tumor-premalignant, fig.width=17, fig.height=10, dpi=300, fig.retina=2}
+# Summarize mutation burden and variant classes for tumor and premalignant samples.
+summary_tumor_premalignant <- plotmafSummary(
+  maf = maf_tumor_premalignant,
+  rmOutlier = TRUE,
+  addStat = "median",
+  dashboard = TRUE,
+  titvRaw = FALSE
+)
+summary_tumor_premalignant
+
+# Generate the combined tumor/premalignant oncoplot with clinical annotations.
+oncoplot_tumor_premalignant <- oncoplot(
+  maf = maf_tumor_premalignant,
+  top = 30,
+  clinicalFeatures = c(
+    "HPV_TP53_mutational_group",
+    "tissue_type",
+    "tp53_status",
+    "p53_ihc_status",
+    "cyclind1_ihc_perc_grp",
+    "matched"
+  ),
+  sortByAnnotation = TRUE,
+  removeNonMutated = FALSE,
+  showTumorSampleBarcodes = TRUE,
+  annotationColor = oncoplot_ann_colors,
+  annotationFontSize = 1.15,
+  legendFontSize = 0.9,
+  titleFontSize = 1.3,
+  fontSize = 0.6,
+  SampleNamefontSize = 0.7,
+  barcode_mar = 5,
+  gene_mar = 8
+)
+oncoplot_tumor_premalignant
+```
+
+# 6. Tumor-Only Analysis
+
+```{r tumor-oncoplot, fig.width=18, fig.height=12, dpi=300, fig.retina=2}
+# Summarize mutation patterns for tumor samples only.
+plotmafSummary(
+  maf = maf_tumor,
+  rmOutlier = TRUE,
+  addStat = "median",
+  dashboard = TRUE,
+  titvRaw = FALSE
+)
+
+# Generate the tumor-only oncoplot
+oncoplot(
+  maf = maf_tumor,
+  top = 84,
+  clinicalFeatures = c(
+    "HPV_TP53_mutational_group",
+    "tp53_status",
+    "p53_ihc_status",
+    "cyclind1_ihc_perc_grp",
+    "matched"
+  ),
+  sortByAnnotation = TRUE,
+  removeNonMutated = FALSE,
+  showTumorSampleBarcodes = TRUE,
+  annotationColor = oncoplot_ann_colors,
+  annotationFontSize = 1.2,
+  legendFontSize = 0.9,
+  titleFontSize = 1.3,
+  fontSize = 0.45,
+  SampleNamefontSize = 0.75,
+  barcode_mar = 5,
+  gene_mar = 9
+)
+```
+
+# 7. HPV-a vs HPV-i
+
+```{r hpv-subset-oncoplots, fig.width=12, fig.height=8, dpi=300, fig.retina=2}
+# Plot the HPV-associated tumor subset.
+plotmafSummary(maf = maf_hpva)
+oncoplot(
+  maf = maf_hpva,
+  top = 50,
+  clinicalFeatures = c(
+    "tp53_status",
+    "p53_ihc_status",
+    "cyclind1_ihc_perc_grp",
+    "matched"
+  ),
+  sortByAnnotation = TRUE,
+  removeNonMutated = FALSE,
+  showTumorSampleBarcodes = TRUE,
+  annotationColor = oncoplot_ann_colors,
+  annotationFontSize = 1.5,
+  legendFontSize = 1,
+  titleFontSize = 1.5,
+  fontSize = 0.7,
+  SampleNamefontSize = 1,
+  barcode_mar = 8,
+  gene_mar = 8
+)
+
+# Plot the HPV-independent tumor subset.
+plotmafSummary(maf = maf_hpvi)
+oncoplot(
+  maf = maf_hpvi,
+  top = 50,
+  clinicalFeatures = c(
+    "tp53_status",
+    "p53_ihc_status",
+    "cyclind1_ihc_perc_grp",
+    "matched"
+  ),
+  sortByAnnotation = TRUE,
+  removeNonMutated = FALSE,
+  showTumorSampleBarcodes = TRUE,
+  annotationColor = oncoplot_ann_colors,
+  annotationFontSize = 1.5,
+  legendFontSize = 1,
+  titleFontSize = 1.5,
+  fontSize = 0.7,
+  SampleNamefontSize = 1,
+  barcode_mar = 5,
+  gene_mar = 8
+)
+```
+
+# 8. HPV-Associated vs HPV-Independent Comparison
+Table of comparsion
+
+```{r hpva-hpvi-comparison}
+# Compare gene mutation frequencies between HPV-associated and HPV-independent tumors.
+hpva_vs_hpvi <- mafCompare(
+  m2 = maf_hpva,
+  m1 = maf_hpvi,
+  m2Name = "HPV-associated",
+  m1Name = "HPV-independent",
+  minMut = 3
+)
+
+# Prepare an interactive comparison table and export it for reporting.
+hpva_vs_hpvi_results <- as.data.frame(hpva_vs_hpvi$results)
+colnames(hpva_vs_hpvi_results) <- make.names(colnames(hpva_vs_hpvi_results), unique = TRUE)
+
+hpva_vs_hpvi_results_table <- hpva_vs_hpvi_results %>%
+  datatable(filter = list(position = "top", clear = FALSE)) %>%
+  formatStyle("pval", color = styleInterval(c(0.05), c("darkgreen", "black")))
+hpva_vs_hpvi_results_table
+
+save_flextable_docx(hpva_vs_hpvi_results, "hpv_mafcompare_results")
+```
+
+```{r hpva-hpvi-comparison-plots, fig.width=10, fig.height=7, dpi=300, fig.retina=2}
+# Select genes for visual comparison using top genes plus near-significant results.
+hpva_vs_hpvi_genes <- unique(c(
+  top_genes(maf_hpva, 10),
+  top_genes(maf_hpvi, 10),
+  hpva_vs_hpvi_results$Hugo_Symbol[hpva_vs_hpvi_results$pval < 0.08]
+)) 
+
+# Compare mutation patterns between HPV-associated and HPV-independent tumors.
+hpva_vs_hpvi_coOncoplot <- coOncoplot(
+  m1 = maf_hpva,
+  m2 = maf_hpvi,
+  m1Name = "HPV-associated",
+  m2Name = "HPV-independent",
+  genes = hpva_vs_hpvi_genes,
+  removeNonMutated = FALSE,
+      legendFontSize = 1,
+      annotationFontSize = 1, 
+      gene_mar=1
+)
+hpva_vs_hpvi_coOncoplot
+
+# Compare mutation frequencies between HPV-associated and HPV-independent tumors.
+hpva_vs_hpvi_coBarplot <- coBarplot(
+  m1 = maf_hpva,
+  m2 = maf_hpvi,
+  genes = hpva_vs_hpvi_genes,
+  m1Name = "HPV-associated",
+  m2Name = "HPV-independent",
+      titleSize = 0.8,
+      geneSize = 0.6,
+      showPct = TRUE,
+      pctSize = 0.7,
+      axisSize = 0.7,
+      legendTxtSize = 0.8
+)
+hpva_vs_hpvi_coBarplot
+```
+
+# 10. HPV-Independent TP53-Wild-Type vs TP53-Mutated Comparison
+
+```{r hpvi-tp53-comparison}
+# Compare HPV-independent tumors by sequencing-derived TP53 status.
+hpvi_tp53wt_vs_tp53mut <- mafCompare(
+  m2 = maf_hpvi_tp53wt,
+  m1 = maf_hpvi_tp53mut,
+  m2Name = "HPVI TP53-wild-type",
+  m1Name = "HPVI TP53-mutated",
+  minMut = 3
+)
+
+# Prepare an interactive comparison table and export it for reporting.
+hpvi_tp53_results <- as.data.frame(hpvi_tp53wt_vs_tp53mut$results)
+colnames(hpvi_tp53_results) <- make.names(colnames(hpvi_tp53_results), unique = TRUE)
+
+hpvi_tp53_results_table <- hpvi_tp53_results %>%
+  datatable(filter = list(position = "top", clear = FALSE)) %>%
+  formatStyle("pval", color = styleInterval(c(0.05), c("darkgreen", "black")))
+hpvi_tp53_results_table
+
+save_flextable_docx(hpvi_tp53_results, "hpvi_TPstatus_mafcompare_result")
+
+```
+
+
+```{r hpvi-tp53-comparison-plots, fig.width=10, fig.height=7, dpi=300, fig.retina=2}
+# Select genes for visual comparison using top genes plus significant results.
+hpvi_tp53_genes <- unique(c(
+  top_genes(maf_hpvi_tp53wt, 10),
+  top_genes(maf_hpvi_tp53mut, 10),
+  hpvi_tp53_results$Hugo_Symbol[hpvi_tp53_results$pval < 0.05]
+))
+
+# Compare mutation patterns between HPV-I/TP53-wt and HPV-I/TP53-mut tumors.
+hpvi_tp53_coOncoplot <-  coOncoplot(
+      m1 = maf_hpvi_tp53wt,
+      m2 = maf_hpvi_tp53mut,
+      m1Name = "HPV-I/TP53wt",
+      m2Name = "HPV-I/TP53mut",
+      genes = hpvi_tp53_genes,
+      removeNonMutated = TRUE,
+      legendFontSize = 0.8,
+      annotationFontSize = 0.8,
+      gene_mar=1
+)
+hpvi_tp53_coOncoplot
+
+# Compare mutation frequencies between HPV-I/TP53-wt and HPV-I/TP53-mut tumors.
+hpvi_tp53_coBarplot <- coBarplot(
+      m1 = maf_hpvi_tp53wt,
+      m2 = maf_hpvi_tp53mut,
+      genes = hpvi_tp53_genes,
+      m1Name = "HPV-I/TP53wt",
+      m2Name = "HPV-I/TP53mut",
+      titleSize = 0.8,
+      geneSize = 0.6,
+      showPct = TRUE,
+      pctSize = 0.7,
+      axisSize = 0.7,
+      legendTxtSize = 0.8
+)
+
+hpvi_tp53_coBarplot
+```
+
+#General Oncoplot for tumor samples 
+
+```{r, fig.width=16, fig.height=10, dpi=300, fig.retina=2}
+# Use the full tumor gene set for the grouped general oncoplot.
+n_top_genes <- 84
+
+ordered_genes <- get_ordered_genes(n_top_genes)
+
+# Generate the grouped tumor oncoplot using the predefined sample and gene order.
+general_oncoplot <- oncoplot(
+  maf = maf_three_groups,
+  genes = ordered_genes,
+  keepGeneOrder = TRUE,
+  sampleOrder = ordered_samples,
+  clinicalFeatures = c(
+    "HPV_TP53_mutational_group",
+    "tp53_status",
+    "p53_ihc_status",
+    "cyclind1_ihc_perc_grp"
+  ),
+  showTumorSampleBarcodes = TRUE,
+  annotationColor = oncoplot_ann_colors,
+  barcode_mar = 5,
+  gene_mar = 4
+)
+general_oncoplot
+```
+
+Same for top 30 genes
+```{r, fig.width=16, fig.height=10, dpi=300, fig.retina=2}
+# Repeat the grouped tumor oncoplot for the top 30 ordered genes.
+n_top_genes <- 30
+
+ordered_genes <- get_ordered_genes(n_top_genes)
+
+plotmafSummary(maf = maf_three_groups)
+
+general_oncoplot <- oncoplot(
+  maf = maf_three_groups,
+  genes = ordered_genes,
+  keepGeneOrder = TRUE,
+  sampleOrder = ordered_samples,
+  clinicalFeatures = c(
+    "HPV_TP53_mutational_group",
+    "tp53_status",
+    "p53_ihc_status"
+  ),
+  showTumorSampleBarcodes = FALSE,
+  annotationColor = oncoplot_ann_colors,
+  barcode_mar = 2,
+  gene_mar = 8
+)
+general_oncoplot
+
+```
+
+# Export MAF object
+```{r export-maf-tumor}
+# Create the export directory and save the tumor MAF object plus source tables.
+maf_tumor_export_dir <- "maf_tumor_export"
+dir.create(maf_tumor_export_dir, showWarnings = FALSE, recursive = TRUE)
+
+save(
+  maf_tumor,
+  file = file.path(maf_tumor_export_dir, "maf_tumor_full_object.RData")
+)
+data.table::fwrite(
+  maf_tumor@data,
+  file = file.path(maf_tumor_export_dir, "maf_tumor_mutations.tsv"),
+  sep = "\t"
+)
+data.table::fwrite(
+  maf_tumor@clinical.data,
+  file = file.path(maf_tumor_export_dir, "maf_tumor_clinical_data.tsv"),
+  sep = "\t"
+)
+
+cat("maf_tumor exported to:", normalizePath(maf_tumor_export_dir), "\n")
+```

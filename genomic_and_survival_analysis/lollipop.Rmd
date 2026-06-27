@@ -1,0 +1,253 @@
+---
+title: "Lollipop Plots and Pathway Summaries"
+author: "Elena Diaz"
+date: "2026-05-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = TRUE, warning = FALSE)
+```
+
+# Custom Functions Defined in This Notebook
+
+- `top_mutated_genes()`: returns the top mutated genes from a MAF object, using
+  `maftools::getGeneSummary()`.
+- `save_lollipop_plot()`: saves a lollipop plot to PNG and skips/removes the
+  file if plotting fails.
+- `show_lollipop_plot()`: displays a lollipop plot inline while safely skipping
+  genes that cannot be plotted.
+
+# Workflow Documentation
+
+## Purpose
+
+This notebook creates protein-domain lollipop plots for recurrently mutated genes in the PSCC tumor MAF object and compares HPV-independent with HPV-associated tumors.
+
+## Required Objects in the R Environment
+
+This notebook expects the following objects:
+
+-   `maf_tumor`: tumor-only MAF object.
+-   `maf_hpvi`: HPV-independent tumor MAF object.
+-   `maf_hpva`: HPV-associated tumor MAF object.
+
+The MAF objects must contain an amino-acid change column used by `AACol` in the lollipop plots. The preferred column is `hgvs_p`; if needed, the setup chunk also checks `HGVSp_Short`, `Protein_Change`, and `AAChange`.
+
+The current clinical group annotation is `HPV_TP53_mutational_group`, with these levels:
+
+-   `HPV-A`
+-   `HPV-I/TP53mut`
+-   `HPV-I/TP53wt`
+
+
+## Main Outputs
+
+PNG files are written to:
+
+`C:/Users/ediaz/pscc_project/outputs/lollipops`
+
+# 1. Setup
+
+```{r lollipop-setup}
+# Load plotting library and prepare the lollipop output directory.
+library(maftools)
+
+lollipop_dir <- "C:/Users/ediaz/pscc_project/outputs/lollipops"
+
+if (!dir.exists(lollipop_dir)) {
+  dir.create(lollipop_dir, recursive = TRUE)
+}
+
+required_maf_objects <- c("maf_tumor", "maf_hpvi", "maf_hpva")
+missing_maf_objects <- setdiff(required_maf_objects, ls(envir = .GlobalEnv))
+
+# Stop early if any required MAF object is missing from the session.
+if (length(missing_maf_objects) > 0) {
+  stop(
+    "Missing required MAF object(s): ",
+    paste(missing_maf_objects, collapse = ", ")
+  )
+}
+
+preferred_aa_columns <- c("hgvs_p", "HGVSp_Short", "Protein_Change", "AAChange")
+aa_column <- preferred_aa_columns[preferred_aa_columns %in% names(maf_tumor@data)][1]
+
+# Choose the amino-acid column used by all lollipop plots.
+if (is.na(aa_column)) {
+  stop(
+    "No amino-acid change column found in maf_tumor. Expected one of: ",
+    paste(preferred_aa_columns, collapse = ", ")
+  )
+}
+
+missing_aa_columns <- required_maf_objects[
+  !vapply(
+    required_maf_objects,
+    function(object_name) aa_column %in% names(get(object_name)@data),
+    logical(1)
+  )
+]
+
+# Confirm that the selected amino-acid column exists in every MAF object.
+if (length(missing_aa_columns) > 0) {
+  stop(
+    "The amino-acid column `", aa_column, "` is missing from: ",
+    paste(missing_aa_columns, collapse = ", ")
+  )
+}
+
+message("Using amino-acid column for lollipop plots: ", aa_column)
+
+# Optional: add genes manually here.
+manual_genes_tumor <- c()       # example: c("TP53", "PIK3CA")
+manual_genes_hpv <- c()         # example: c("TP53", "NOTCH1")
+```
+
+```{r helper-functions}
+# Return the most frequently mutated genes for a given MAF object.
+top_mutated_genes <- function(maf_object, n = 15) {
+  gene_summary <- getGeneSummary(maf_object)
+
+  if (nrow(gene_summary) == 0) {
+    return(character())
+  }
+
+  head(gene_summary$Hugo_Symbol, n)
+}
+
+# Save a plot expression to a PNG file and remove incomplete output on error.
+save_lollipop_plot <- function(filename, plot_expression, width, height) {
+  plot_ok <- FALSE
+
+  png(
+    filename = filename,
+    width = width,
+    height = height,
+    units = "in",
+    res = 300
+  )
+
+  tryCatch(
+    {
+      force(plot_expression)
+      plot_ok <- TRUE
+    },
+    error = function(error) {
+      message("Skipping plot `", basename(filename), "`: ", error$message)
+    },
+    finally = {
+      dev.off()
+    }
+  )
+
+  if (!plot_ok && file.exists(filename)) {
+    unlink(filename)
+  }
+
+  invisible(plot_ok)
+}
+
+# Print a plot expression inline while keeping the notebook running on errors.
+show_lollipop_plot <- function(plot_expression) {
+  tryCatch(
+    {
+      force(plot_expression)
+      invisible(TRUE)
+    },
+    error = function(error) {
+      message("Skipping inline plot: ", error$message)
+      invisible(FALSE)
+    }
+  )
+}
+```
+
+# 2. Tumor Lollipop Plots
+
+Single lollipop plots are created for the top 15 mutated genes in `maf_tumor`. Additional genes can be added in `manual_genes_tumor`.
+
+```{r lollipop-top15-tumor, fig.width=12, fig.height=6, dpi=300}
+# Build the tumor gene list from top mutated genes plus any manual additions.
+top15_tumor_genes <- top_mutated_genes(maf_tumor, n = 15)
+genes_tumor <- unique(c(top15_tumor_genes, manual_genes_tumor))
+
+# Save and display one lollipop plot per selected tumor gene.
+for (gene_name in genes_tumor) {
+  message("Plotting tumor lollipop for: ", gene_name)
+
+  save_lollipop_plot(
+    filename = file.path(lollipop_dir, paste0(gene_name, "_tumor.png")),
+    width = 12,
+    height = 6,
+    plot_expression = lollipopPlot(
+      maf = maf_tumor,
+      gene = gene_name,
+      AACol = aa_column,
+      showMutationRate = TRUE, 
+      labelPos = "all"
+    )
+  )
+
+  show_lollipop_plot(
+    lollipopPlot(
+      maf = maf_tumor,
+      gene = gene_name,
+      AACol = aa_column,
+      showMutationRate = TRUE, 
+      labelPos = "all"
+    )
+  )
+}
+```
+
+# 3. HPV-Independent vs HPV-Associated Lollipop Plots
+
+Comparative plots are created for the top 15 mutated genes in `maf_hpvi`, then compared with `maf_hpva`. Additional genes can be added in `manual_genes_hpv`.
+
+```{r lollipop-top15-hpv-comparison, fig.width=15, fig.height=8, dpi=300}
+# Build the HPV comparison gene list from HPV-independent tumors plus manual additions.
+top15_hpv_genes <- top_mutated_genes(maf_hpvi, n = 15)
+genes_hpv <- unique(c(top15_hpv_genes, manual_genes_hpv))
+
+# Save and display comparative lollipop plots for HPV-I versus HPV-A tumors.
+for (gene_name in genes_hpv) {
+  message("Plotting HPV comparison lollipop for: ", gene_name)
+
+  save_lollipop_plot(
+    filename = file.path(lollipop_dir, paste0(gene_name, "_hpvi_vs_hpva.png")),
+    width = 15,
+    height = 8,
+    plot_expression = lollipopPlot2(
+      m1 = maf_hpvi,
+      m2 = maf_hpva,
+      gene = gene_name,
+      AACol1 = aa_column,
+      AACol2 = aa_column,
+      m1_name = "PSCC HPV-independent",
+      m2_name = "PSCC HPV-associated",
+      m1_label = "none",
+      m2_label = "none",
+      verbose = FALSE
+    )
+  )
+
+  show_lollipop_plot(
+    lollipopPlot2(
+      m1 = maf_hpvi,
+      m2 = maf_hpva,
+      gene = gene_name,
+      AACol1 = aa_column,
+      AACol2 = aa_column,
+      m1_name = "PSCC HPV-independent",
+      m2_name = "PSCC HPV-associated",
+      m1_label = "none",
+      m2_label = "none",
+      verbose = FALSE
+    )
+  )
+}
+```
+
+
+

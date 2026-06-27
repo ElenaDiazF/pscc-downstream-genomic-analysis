@@ -1,0 +1,591 @@
+---
+title: "MAF Object Creations"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+# Workflow Documentation
+
+Divided into two separate files: first takes until maf object creation,
+the second file records all the oncoplot generation and inspection
+steps.
+
+## Purpose
+
+This file builds the MAF objects and oncoplots used to inspect the PSCC
+filtered variant workflow. It first shows the list-level MAF summaries,
+then the combined tumor/premalignant oncoplot, then the tumor-only
+analysis, HPV subsets, and finally the TP53-mutational-status subsets
+within HPV-independent tumors.
+
+## Required Input Objects
+
+Required objects already available in the R environment:
+
+-   `list_analyzed`: final filtered variant table
+-   `metadata_pscc`: sample-level metadata.
+-   `oncomine_followup`: clinical table with HPV status and IHC
+    variables.
+-   `samples_not_passing`: samples excluded during initial sample
+    checks.
+-   `tp53_ihc_final`: sample-level table containing `tp53_status` from
+    sequencing and `p53_ihc_status` from immunohistochemistry.
+
+## Main Outputs
+
+-   `maf_tumor_premalignant`: MAF object for combined tumor and
+    premalignant samples from `list_analyzed`.
+-   `maf_tumor`: tumor-only MAF object.
+-   `maf_hpva` and `maf_hpvi`: HPV-associated and HPV-independent tumor
+    MAF objects.
+-   `maf_hpvi_tp53wt` and `maf_hpvi_tp53mut`: HPV-independent tumor MAF
+    objects split by sequencing-derived TP53 mutational status.
+
+## Important Assumptions
+
+-   `tp53_status` means sequencing-derived TP53 status.
+-   `p53_ihc_status` means p53 immunohistochemistry pattern.
+-   Normal samples are excluded from this oncoplot workflow.
+-   Samples listed in `samples_not_passing` are excluded from the
+    clinical annotation table.
+-   Samples with clinical annotation but no filtered variants are
+    retained in oncoplots using silent placeholder rows.
+
+## Custom functions in this notebook
+
+- `prepare_maf_table()`: converts the filtered variant table into the column
+  structure expected by `maftools`.
+- `add_dummy_samples()`: adds silent placeholder rows for clinically retained
+  samples with no filtered variants.
+- `top_genes()`: returns the top mutated genes from a MAF object.
+- `build_maf_from_clinical()`: builds a MAF object for a selected clinical
+  subset.
+- `get_ordered_genes()`: orders genes for the grouped tumor oncoplot, giving
+  priority to HPV-independent TP53-mutated tumors.
+
+# 1. Helper Functions and Shared Settings
+
+```{r helpers}
+# Map Sequence Ontology annotations to maftools variant classes.
+so_to_maf <- c(
+  "missense_variant" = "Missense_Mutation",
+  "missense_variant&splice_region_variant" = "Missense_Mutation",
+  "frameshift_variant" = "Frame_Shift_Ins",
+  "stop_gained" = "Nonsense_Mutation",
+  "stop_gained&splice_region_variant" = "Nonsense_Mutation",
+  "stop_lost" = "Nonstop_Mutation",
+  "splice_donor_variant&intron_variant" = "Splice_Site",
+  "splice_donor_variant&splice_region_variant&intron_variant" = "Splice_Site",
+  "splice_acceptor_variant&intron_variant" = "Splice_Site",
+  "splice_donor_variant&disruptive_inframe_deletion&splice_region_variant&intron_variant" = "Splice_Site",
+  "splice_donor_variant&missense_variant&splice_region_variant&intron_variant" = "Splice_Site",
+  "splice_acceptor_variant&missense_variant&splice_region_variant&intron_variant" = "Splice_Site",
+  "frameshift_variant&synonymous_variant" = "Frame_Shift_Del",
+  "frameshift_variant&missense_variant" = "Frame_Shift_Ins",
+  "start_lost" = "Nonsense_Mutation"
+)
+
+# Convert filtered variants into a MAF-compatible data.table.
+prepare_maf_table <- function(variant_dt) {
+  maf_table <- copy(as.data.table(variant_dt))
+
+  if ("tissue-type" %in% names(maf_table)) {
+    setnames(maf_table, "tissue-type", "tissue_type")
+  }
+
+  maf_table[, Tumor_Sample_Barcode := as.character(sample_id)]
+  maf_table[, Hugo_Symbol := as.character(gene)]
+  maf_table[, Chromosome := as.character(number_chrom)]
+  maf_table[, Start_Position := as.integer(pos)]
+  maf_table[, End_Position := as.integer(pos)]
+  maf_table[, Reference_Allele := as.character(ref)]
+  maf_table[, Tumor_Seq_Allele2 := as.character(alt)]
+  maf_table[, Variant_Classification := so_to_maf[annotation]]
+
+  # Reclassify frameshift events as insertions or deletions based on allele length.
+  maf_table[
+    !is.na(annotation) & grepl("frameshift", annotation, ignore.case = TRUE),
+    Variant_Classification := fifelse(
+      nchar(Tumor_Seq_Allele2) > nchar(Reference_Allele),
+      "Frame_Shift_Ins",
+      "Frame_Shift_Del"
+    )
+  ]
+
+  # Report annotation terms that do not map directly to maftools classes.
+  unmapped <- unique(maf_table[is.na(Variant_Classification), annotation])
+  if (length(unmapped) > 0) {
+    message(
+      "Unmapped annotation terms, kept as NA and handled by maftools: ",
+      paste(unmapped, collapse = ", ")
+    )
+  }
+
+  # Derive the maftools variant type from reference and alternate allele lengths.
+  maf_table[, ref_len := nchar(Reference_Allele)]
+  maf_table[, alt_len := nchar(Tumor_Seq_Allele2)]
+  maf_table[, Variant_Type := fcase(
+    Reference_Allele == "-" | alt_len > ref_len, "INS",
+    Tumor_Seq_Allele2 == "-" | alt_len < ref_len, "DEL",
+    ref_len == 1L, "SNP",
+    ref_len == 2L, "DNP",
+    ref_len == 3L, "TNP",
+    default = "ONP"
+  )]
+  maf_table[, c("ref_len", "alt_len") := NULL]
+
+  maf_table
+}
+
+# Add silent rows so samples without retained variants remain visible in plots.
+add_dummy_samples <- function(maf_table, clinical_dt) {
+  samples_no_variants <- setdiff(
+    clinical_dt$Tumor_Sample_Barcode,
+    maf_table$Tumor_Sample_Barcode
+  )
+
+  if (length(samples_no_variants) == 0) {
+    return(maf_table)
+  }
+
+  dummy_rows <- data.table(
+    Tumor_Sample_Barcode = as.character(samples_no_variants),
+    Hugo_Symbol = "Unknown",
+    Chromosome = "1",
+    Start_Position = 1L,
+    End_Position = 1L,
+    Reference_Allele = "A",
+    Tumor_Seq_Allele2 = "A",
+    Variant_Classification = "Silent",
+    Variant_Type = "SNP"
+  )
+
+  rbindlist(list(maf_table, dummy_rows), fill = TRUE)
+}
+
+# Return the most frequently mutated genes from a MAF object.
+top_genes <- function(maf_object, n = 10) {
+  gene_summary <- getGeneSummary(maf_object)
+  gene_summary[seq_len(min(n, nrow(gene_summary))), Hugo_Symbol]
+}
+```
+
+# 2. Prepare Variant Tables
+
+```{r prepare-variant-tables}
+# Create MAF-ready and data.table versions of the filtered variants.
+  maf_table_all <- prepare_maf_table(list_analyzed)
+
+  filtered_variants <- copy(as.data.table(list_analyzed))
+```
+
+# 3. Prepare Clinical Annotation Table
+Prepare all data in metadata filtered
+
+```{r clinical-annotation}
+# Merge sample metadata with clinical follow-up variables.
+metadata_filtered <- metadata_pscc %>%
+  left_join(oncomine_followup, by = c("Patient" = "study_id")) %>%
+  rename_with(~ gsub("-", "_", tolower(.x)))
+
+samples_not_passing_ids <- as.character(metadata_not_passing$Sample_ID)
+
+# Keep tumor and premalignant samples that passed the initial QC filters.
+metadata_filtered <- metadata_filtered %>%
+  filter(
+    !sample_id %in% samples_not_passing_ids,
+    tissue_type %in% c("tumor", "premalignant")  )
+
+# Add TP53 sequencing status and p53 IHC status from the IHC comparison table.
+metadata_filtered <- metadata_filtered %>%
+  select(-p53_ihc_status) %>%
+  left_join(
+    ihc_genetics %>%
+      select(
+        `Tumor Sample ID`,
+        `TP53 Status`,
+        `p53 IHC Status`
+      ),
+    by = c("sample_id" = "Tumor Sample ID")
+  )
+
+metadata_filtered <- metadata_filtered %>%
+  rename(
+    tp53_status = `TP53 Status`, 
+    p53_ihc_status = `p53 IHC Status`
+  )
+
+colnames(metadata_filtered)
+```
+
+```{r clinical-recoding}
+# Select clinical variables used by maftools annotations.
+clinical_for_maf_all <- as.data.table(metadata_filtered)[,.(
+    Tumor_Sample_Barcode = as.character(sample_id),
+    patient, hpv_status, tissue_type, stage, p53_ihc_status, 
+    tp53_status, cyclind1_ihc_perc, matched, age_calc)]
+
+clinical_for_maf_all <- unique(clinical_for_maf_all)
+
+# Add minimal clinical rows for variant samples missing from the merged metadata.
+missing_clinical_samples <- setdiff(
+  filtered_variants$sample_id,
+  clinical_for_maf_all$Tumor_Sample_Barcode)
+
+if (length(missing_clinical_samples) > 0) {
+  clinical_for_maf_all <- rbindlist(
+    list(
+      clinical_for_maf_all,
+      unique(filtered_variants[
+        sample_id %in% missing_clinical_samples,
+        .(
+          Tumor_Sample_Barcode = sample_id,
+          patient,
+          tissue_type,
+          matched
+        )
+      ])
+    ),
+    fill = TRUE
+  )
+}
+
+# Confirm how many clinical samples remain for MAF construction.
+cat(  "Clinical samples retained:",
+  uniqueN(clinical_for_maf_all$Tumor_Sample_Barcode),
+  "\n" )
+```
+
+# 4. Recode clinical variables
+Standardize follow-up variables before downstream clinical annotation
+uses.
+
+```{r clinical-recoding}
+# Ensure numeric fields are typed before plotting or binning.
+clinical_for_maf_all[, age_calc := as.numeric(age_calc)]
+
+
+# Identify samples with sequencing-detected TP53 variants.
+tp53mut_samples <- unique(
+  filtered_variants[gene == "TP53", sample_id]
+)
+
+# Standardize HPV status labels.
+clinical_for_maf_all[, hpv_status := fcase(
+  hpv_status %in% c("Associated", "associated"), "Associated",
+  hpv_status %in% c("Independent", "independent"), "Independent",
+  hpv_status %in% c("Unknown", "unknown", "NA"), "Unknown",
+  default = NA_character_
+)]
+
+# Standardize TP53 status labels.
+clinical_for_maf_all[, tp53_status := fcase(
+  tp53_status %in% c("TP53-mut", "TP53mut", "TP53-mutated"), "TP53-mutated",
+  tp53_status %in% c("TP53-wt", "TP53wt", "TP53-wild-type"), "TP53-wild-type",
+  default = NA_character_
+)]
+
+# Fill missing TP53 status using the filtered variant table.
+clinical_for_maf_all[
+  is.na(tp53_status) | tp53_status == "",
+  tp53_status := fifelse(
+    Tumor_Sample_Barcode %in% tp53mut_samples,
+    "TP53-mutated",
+    "TP53-wild-type"
+  )
+]
+
+# Standardize p53 IHC labels.
+clinical_for_maf_all[, p53_ihc_status := fcase(
+  p53_ihc_status %in% c("p53-ab", "p53-abnormal", "p53 abnormal"), "p53-aberrant",
+  p53_ihc_status %in% c("p53-wt", "p53-wild-type", "p53 wild type"), "p53-wild-type",
+  default = NA_character_
+)]
+
+# Recode remaining clinical variables for consistent oncoplot annotations.
+clinical_for_maf_all[, stage := as.integer(stage)]
+clinical_for_maf_all[, cyclind1_ihc_perc := as.numeric(cyclind1_ihc_perc)]
+clinical_for_maf_all[, matched := fcase(
+  tolower(trimws(as.character(matched))) == "yes", "Yes",
+  tolower(trimws(as.character(matched))) == "no", "No",
+  default = NA_character_
+)]
+clinical_for_maf_all[, tissue_type := trimws(tolower(as.character(tissue_type)))]
+
+# Convert cyclin D1 IHC percentage into grouped annotation bins.
+clinical_for_maf_all[, cyclind1_ihc_perc_grp := cut(
+  cyclind1_ihc_perc,
+  breaks = c(-Inf, 0, 5, 10, 25, 50, 75, 100),
+  labels = c("0", "1-5", "6-10", "11-25", "26-50", "51-75", "76-100"),
+  right = TRUE
+)]
+
+# Define the combined HPV/TP53 grouping used for tumor oncoplot ordering.
+clinical_for_maf_all[, HPV_TP53_mutational_group := fcase(
+  hpv_status == "Associated",
+  "HPV-A",
+  hpv_status == "Independent" & tp53_status == "TP53-mutated",
+  "HPV-I/TP53mut",
+  hpv_status == "Independent" & tp53_status == "TP53-wild-type",
+  "HPV-I/TP53wt",
+  default = NA_character_
+)]
+
+# Set annotation factor levels to control display order in plots.
+clinical_for_maf_all[, hpv_status := factor(hpv_status, levels = c("Associated", "Independent", "Unknown"))]
+clinical_for_maf_all[, tissue_type := factor(tissue_type, levels = c("tumor", "premalignant"))]
+clinical_for_maf_all[, stage := factor(stage, levels = c(1, 2, 3, 4), labels = c("I", "II", "III", "IV"))]
+clinical_for_maf_all[, tp53_status := factor(tp53_status, levels = c("TP53-wild-type", "TP53-mutated"))]
+clinical_for_maf_all[, p53_ihc_status := factor(p53_ihc_status, levels = c("p53-wild-type", "p53-aberrant"))]
+clinical_for_maf_all[, HPV_TP53_mutational_group := factor(
+  HPV_TP53_mutational_group,
+  levels = c("HPV-A", "HPV-I/TP53mut", "HPV-I/TP53wt")
+)]
+clinical_for_maf_all[, matched := factor(matched, levels = c("No", "Yes"))]
+
+# Keep a tumor-only clinical table for tumor-specific MAF objects.
+clinical_for_maf <- copy(clinical_for_maf_all[tissue_type == "tumor"])
+
+```
+
+#5. Build MAF Objects maf_tumor object and maf_tumor_premalignant
+
+```{r build-maf-objects}
+# Keep only samples present in the clinical annotation table.
+# Then add silent placeholder rows for samples with no retained variants.
+maf_table_all <- maf_table_all[
+  Tumor_Sample_Barcode %in% clinical_for_maf_all$Tumor_Sample_Barcode
+]
+maf_table_all <- add_dummy_samples(maf_table_all, clinical_for_maf_all)
+
+# Tumor-only MAF table, including dummy rows already added above.
+maf_table_tumor <- maf_table_all[
+  Tumor_Sample_Barcode %in% clinical_for_maf$Tumor_Sample_Barcode
+]
+```
+
+```{r}
+# Build a MAF object from a clinical subset and matching mutation rows.
+build_maf_from_clinical <- function(clinical_dt, maf_dt) {
+  sample_ids <- as.character(clinical_dt$Tumor_Sample_Barcode)
+
+  read.maf(
+    maf = maf_dt[Tumor_Sample_Barcode %in% sample_ids],
+    clinicalData = as.data.frame(clinical_dt)
+  )
+}
+
+# Build the combined tumor/premalignant and tumor-only MAF objects.
+maf_tumor_premalignant <- build_maf_from_clinical(
+  clinical_for_maf_all,
+  maf_table_all
+)
+
+maf_tumor <- build_maf_from_clinical(
+  clinical_for_maf,
+  maf_table_tumor
+)
+
+# Build HPV-associated and HPV-independent tumor MAF subsets.
+maf_hpva <- build_maf_from_clinical(
+  clinical_for_maf[as.character(hpv_status) == "Associated"],
+  maf_table_tumor
+)
+
+maf_hpvi <- build_maf_from_clinical(
+  clinical_for_maf[as.character(hpv_status) == "Independent"],
+  maf_table_tumor
+)
+
+# Build HPV-independent tumor subsets by sequencing-derived TP53 status.
+maf_hpvi_tp53wt <- build_maf_from_clinical(
+  clinical_for_maf[
+    as.character(hpv_status) == "Independent" &
+      as.character(tp53_status) == "TP53-wild-type"
+  ],
+  maf_table_tumor
+)
+
+maf_hpvi_tp53mut <- build_maf_from_clinical(
+  clinical_for_maf[
+    as.character(hpv_status) == "Independent" &
+      as.character(tp53_status) == "TP53-mutated"
+  ],
+  maf_table_tumor
+)
+```
+
+```{r}
+# Store all generated MAF objects in a named list for summaries.
+maf_objects <- list(
+  tumor_premalignant = maf_tumor_premalignant,
+  tumor = maf_tumor,
+  hpva = maf_hpva,
+  hpvi = maf_hpvi,
+  hpvi_tp53wt = maf_hpvi_tp53wt,
+  hpvi_tp53mut = maf_hpvi_tp53mut
+)
+```
+
+```{r}
+# Summarize the clinical sample count represented in each MAF object.
+maf_build_summary <- data.table(
+  maf_object = names(maf_objects),
+  clinical_samples = c(
+    uniqueN(clinical_for_maf_all$Tumor_Sample_Barcode),
+    uniqueN(clinical_for_maf$Tumor_Sample_Barcode),
+    uniqueN(clinical_for_maf[as.character(hpv_status) == "Associated", Tumor_Sample_Barcode]),
+    uniqueN(clinical_for_maf[as.character(hpv_status) == "Independent", Tumor_Sample_Barcode]),
+    uniqueN(clinical_for_maf[
+      as.character(hpv_status) == "Independent" &
+        as.character(tp53_status) == "TP53-wild-type",
+      Tumor_Sample_Barcode
+    ]),
+    uniqueN(clinical_for_maf[
+      as.character(hpv_status) == "Independent" &
+        as.character(tp53_status) == "TP53-mutated",
+      Tumor_Sample_Barcode
+    ])
+  ))
+
+maf_build_summary
+```
+
+```{r}
+# Print maftools sample summaries for each MAF object.
+getSampleSummary(maf_tumor_premalignant)
+getSampleSummary(maf_tumor)
+getSampleSummary(maf_hpva)
+getSampleSummary(maf_hpvi)
+getSampleSummary(maf_hpvi_tp53wt)
+getSampleSummary(maf_hpvi_tp53mut)
+```
+
+# 6. For the general oncoplot
+```{r}
+# Define tumor sample groups used in the grouped oncoplot.
+samples_hpva <- clinical_for_maf[
+  as.character(hpv_status) == "Associated",
+  Tumor_Sample_Barcode
+]
+
+samples_hpvi <- clinical_for_maf[
+  as.character(hpv_status) == "Independent",
+  Tumor_Sample_Barcode
+]
+
+samples_hpvi_tp53wt <- clinical_for_maf[
+  Tumor_Sample_Barcode %in% samples_hpvi &
+    as.character(tp53_status) == "TP53-wild-type",
+  Tumor_Sample_Barcode
+]
+samples_hpvi_tp53mut <- clinical_for_maf[
+  Tumor_Sample_Barcode %in% samples_hpvi &
+    as.character(tp53_status) == "TP53-mutated",
+  Tumor_Sample_Barcode
+]
+```
+
+```{r}
+# Sample order --> HPVA, HPVI-TP53mut, HPVI-TP53wt
+ordered_samples <- unique(c(
+  samples_hpva,
+  samples_hpvi_tp53mut,
+  samples_hpvi_tp53wt))
+
+group_order <- c(
+  "HPV-A",
+  "HPV-I/TP53mut",
+  "HPV-I/TP53wt")
+
+# Build clinical data in the same order as the sample display order.
+clinical_three_groups <- as.data.frame(
+  clinical_for_maf[Tumor_Sample_Barcode %in% ordered_samples])
+
+clinical_three_groups <- clinical_three_groups[match(
+  ordered_samples,
+  clinical_three_groups$Tumor_Sample_Barcode), ]
+
+clinical_three_groups$HPV_TP53_mutational_group <- factor(
+  as.character(clinical_three_groups$HPV_TP53_mutational_group),
+  levels = group_order
+)
+
+# Build a grouped tumor MAF object using the ordered clinical table.
+maf_three_groups <- read.maf(
+  maf = maf_table_tumor[Tumor_Sample_Barcode %in% ordered_samples],
+  clinicalData = clinical_three_groups
+)
+```
+
+```{r}
+# Gene order --> set by HPVI-TP53mut
+top_genes_global <- getGeneSummary(maf_three_groups)$Hugo_Symbol
+
+hpvi_tp53mut_gene_counts <- sort(table(unique(
+  as.data.frame(maf_hpvi_tp53mut@data[, c("Hugo_Symbol", "Tumor_Sample_Barcode")])
+)$Hugo_Symbol), decreasing = TRUE)
+
+# Return the top genes with HPV-I/TP53-mutated genes shown first when present.
+get_ordered_genes <- function(n_top_genes) {
+  
+  top_genes <- top_genes_global[seq_len(min(n_top_genes, length(top_genes_global)))]
+  
+  hpvi_tp53mut_gene_counts <- sort(table(unique(
+    as.data.frame(maf_hpvi_tp53mut@data[, c("Hugo_Symbol", "Tumor_Sample_Barcode")])
+  )$Hugo_Symbol), decreasing = TRUE)
+  
+  ordered_genes <- c(
+    intersect(names(hpvi_tp53mut_gene_counts), top_genes),
+    setdiff(top_genes, names(hpvi_tp53mut_gene_counts))
+  )
+  
+  ordered_genes[!is.na(ordered_genes)]
+}
+```
+
+# 7. Color annotations
+
+```{r annotation-colors}
+# Define fixed colors for all clinical annotation tracks used in oncoplots.
+oncoplot_ann_colors <- list(
+  HPV_TP53_mutational_group = c(
+    "HPV-A" = "#377EB8",
+    "HPV-I/TP53mut" = "#E69F00",
+    "HPV-I/TP53wt" = "#009E73"
+  ),
+  tissue_type = c(
+    "tumor" = "#7B3294",
+    "premalignant" = "#A6DBA0"
+  ),
+  hpv_status = c(
+    "Associated" = "#2C7BB6",
+    "Independent" = "#FDAE61",
+    "Unknown" = "#BDBDBD"
+  ),
+  tp53_status = c(
+    "TP53-mutated" = "#CC79A7",
+    "TP53-wild-type" = "#56B4E9"
+  ),
+  p53_ihc_status = c(
+    "p53-aberrant" = "#D55E00",
+    "p53-wild-type" = "#0072B2"
+  ),
+  matched = c(
+    "Yes" = "#4D9221",
+    "No" = "#762A83"
+  ),
+  cyclind1_ihc_perc_grp = c(
+    "0" = "grey95",
+    "1-5" = "grey85",
+    "6-10" = "grey75",
+    "11-25" = "grey65",
+    "26-50" = "grey55",
+    "51-75" = "grey45",
+    "76-100" = "grey35"
+  )
+)
+```
+

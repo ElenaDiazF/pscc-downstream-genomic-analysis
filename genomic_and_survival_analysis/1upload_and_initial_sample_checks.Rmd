@@ -1,0 +1,496 @@
+---
+title: "PSCC filtering input and initial sample checks"
+author: "Elena Diaz"
+date: "2026-06-17"
+output: html_document
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+## Setup
+
+Load packages used for data import, table handling, REDCap access, and optional
+exports.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r libraries}
+library(dplyr)
+library(knitr)
+library(fst)
+library(writexl)
+library(readr)
+library(data.table)
+library(tibble)
+library(redcapAPI)
+library(curl)
+library(httr)
+library(maftools)
+library(DT)
+library(flextable)
+library(officer)
+library(readxl)
+library(ggplot2)
+library(gridExtra)
+library(R.utils)
+library(tidyverse)
+library(gtsummary)
+```
+
+## Custom functions in this notebook
+
+- `save_flextable_docx()`: exports a data frame or `gtsummary` table as a
+  formatted Word document.
+- `normalize_name()`: standardizes column names for robust matching.
+- `find_column()`: finds the first matching metadata column from a list of
+  candidate names.
+
+## Data import
+
+All input files and external data sources used in the initial PSCC checks are
+loaded here.
+
+### Filtered variants
+
+`list_analyzed` stores the filtered variant table produced after merging the
+variant lists, removing the hypermutated sample, and removing recurrent
+artefacts observed in five or more samples.
+
+```{r import-filtered-variants}
+# Load the filtered variant table used for all downstream checks.
+# filtered_variants_path <- "C:/Users/ediaz/pscc_project/data/filtered_variants_outlier.fst"
+filtered_variants_path <- "C:/Users/ediaz/pscc_project/data/filtered_variants.fst"
+
+list_analyzed <- read_fst(filtered_variants_path)
+
+# Reorder annotation columns 
+list_analyzed <- list_analyzed %>%
+  relocate(sift_score:gnom_ad4_1_joint_nfe_af,     .after = last_col()   )
+```
+
+### REDCap clinical table
+
+`oncomine_followup` stores REDCap clinical information after removing personal
+data fields and patients without WES samples.
+
+```{r import-redcap}
+# REDCap connection credentials are stored outside this script.
+source("C:/Users/ediaz/pscc_project/tokens.R")
+
+# Open the REDCap connection and import typed clinical records.
+rcon_VSCC <- redcapConnection(
+  url = api_url,
+  token = token_PSCC)
+
+oncomine_followup <- exportRecordsTyped(
+  rcon = rcon_VSCC ) %>%
+  select(-surnames, -sec_study_id, -age, -diag_date) %>%
+  filter(!if_all(c(id_tumoral, id_premalignant, id_normal), is.na))
+```
+
+`patient_hpv` keeps the patient identifier, HPV status and tumor sample ID.
+
+```{r import-patient-hpv}
+# Keep only the identifiers needed for HPV/sample checks.
+patient_hpv <- oncomine_followup %>% select(study_id, hpv_status, id_tumoral)
+```
+
+### Metadata
+
+`metadata_pscc` stores sample-level metadata, with one row per WES sample.
+
+```{r import-metadata}
+# Load sample-level metadata.
+metadata_path <- "C:/Users/ediaz/pscc_project/data/metadata-pscc.csv"
+metadata_pscc <- read_delim(metadata_path, delim = ",", show_col_types = FALSE)
+```
+
+### Coverage and contamination tables
+
+`low_coverage` and `contamination` store quality-control tables used to identify
+samples that do not pass coverage or contamination thresholds.
+
+```{r import-qc-tables}
+# Load QC tables used to flag samples that fail coverage or contamination.
+base_path <- "C:/Users/ediaz/pscc_project/data"
+
+low_cov_path <- file.path(base_path, "low_coverage_samples_mutational_load.tsv")
+contamination_path <- file.path(base_path, "sample_contamination_stats.tsv")
+
+low_coverage <- read_tsv(low_cov_path, show_col_types = FALSE)
+contamination <- read_tsv(contamination_path, show_col_types = FALSE)
+```
+
+### Optional exports
+
+These exports are disabled by default.
+
+```{r optional-exports}
+# Excel format.
+# write_xlsx(list_analyzed, "C:/Users/ediaz/pscc_project/downloads/list_analyzed.xlsx")
+
+# fst format.
+# write_fst(list_analyzed, "C:/Users/ediaz/pscc_project/downloads/list_analyzed.fst")
+```
+
+## General data overview
+
+Compact overview of the main objects loaded above.
+
+```{r data-overview}
+# Print row, column, and variable-name checks for each imported object.
+cat("list_analyzed:", nrow(list_analyzed), "rows (variants filtered) and", ncol(list_analyzed), "columns (variables studied)\n")
+colnames(list_analyzed)
+
+cat("oncomine_followup:", nrow(oncomine_followup), "rows and", ncol(oncomine_followup), "columns\n")
+colnames(oncomine_followup)
+
+cat("patient_hpv:", nrow(patient_hpv), "rows and", ncol(patient_hpv), "columns\n")
+colnames(patient_hpv)
+
+cat("metadata_pscc:", nrow(metadata_pscc), "rows (samples) and", ncol(metadata_pscc), "columns (variables studied)\n")
+colnames(metadata_pscc)
+
+cat("low_coverage:", nrow(low_coverage), "rows and", ncol(low_coverage), "columns\n")
+colnames(low_coverage)
+
+cat("contamination:", nrow(contamination), "rows and", ncol(contamination), "columns\n")
+colnames(contamination)
+```
+
+## Saving tables and figures
+example: save_flextable_docx(variant_type_counts, "variant_type_counts")
+```{r}
+# Export a table-like object to a formatted Word document.
+save_flextable_docx <- function(data, filename) {
+  
+  base_path <- "C:/Users/ediaz/pscc_project/outputs/figures/"
+  full_path <- paste0(base_path, filename, ".docx")
+  
+  # handle both dataframes and gtsummary objects
+  ft <- if (inherits(data, "gtsummary")) {
+    as_flex_table(data)
+  } else {
+    flextable(as.data.frame(data))
+  }
+  
+  ft %>%
+    theme_booktabs() %>%
+    fontsize(size = 9, part = "all") %>%
+    font(fontname = "Arial", part = "all") %>%
+    autofit() %>%
+    save_as_docx(path = full_path)
+  
+  message("Saved: ", full_path)
+}
+```
+
+## Initial sample checks
+
+These checks summarize the PSCC sample set and the filtered variant table used
+in the downstream filtering workflow.
+
+### HPV status
+
+Count HPV status categories among patients with available tissue samples.
+
+```{r hpv-status}
+# Count HPV status categories in the patient/sample table.
+patient_hpv %>%
+  count(hpv_status)
+```
+
+### Identify key metadata columns
+
+Detect the column names present in the metadata table.
+
+```{r detect-columns}
+# Normalize names so metadata columns can be detected despite punctuation/case differences.
+normalize_name <- function(x) {
+  x <- tolower(x)
+  x <- gsub("[^a-z0-9]+", "_", x)
+  x <- gsub("_+", "_", x)
+  gsub("^_|_$", "", x)
+}
+
+# Return the first metadata column matching the requested candidate names.
+find_column <- function(df, candidates) {
+  nm <- names(df)
+  nm_clean <- normalize_name(nm)
+  idx <- match(normalize_name(candidates), nm_clean)
+  idx <- idx[!is.na(idx)]
+  if (length(idx) == 0) return(NA_character_)
+  nm[idx[1]]
+}
+
+# Detect required metadata columns before using them in summaries.
+sample_col  <- find_column(metadata_pscc, c("Sample_ID", "sample_id"))
+patient_col <- find_column(metadata_pscc, c("Patient", "patient"))
+matched_col <- find_column(metadata_pscc, c("Matched", "matched"))
+tissue_col  <- find_column(metadata_pscc, c("Tissue-type", "tissue_type", "tissue type"))
+
+if (any(is.na(c(sample_col, patient_col, matched_col, tissue_col)))) {
+  stop(
+    "Could not identify one or more required metadata columns. Found columns: ",
+    paste(names(metadata_pscc), collapse = ", ")
+  )
+}
+```
+
+### Summary of metadata samples
+
+Summarize the metadata table at the sample level.
+
+```{r metadata-metrics}
+# Convert key metadata columns to comparable character vectors.
+metadata_sample_values <- as.character(metadata_pscc[[sample_col]])
+metadata_patient_values <- as.character(metadata_pscc[[patient_col]])
+metadata_matched_values <- tolower(trimws(as.character(metadata_pscc[[matched_col]])))
+metadata_tissue_values <- tolower(trimws(as.character(metadata_pscc[[tissue_col]])))
+
+total_metadata_rows <- nrow(metadata_pscc)
+total_unique_samples <- n_distinct(metadata_sample_values)
+
+# Count matched and tissue-specific samples.
+matched_samples_n <- sum(metadata_matched_values == "yes", na.rm = TRUE)
+
+sample_duplicates <- tibble(sample_id = metadata_sample_values) %>%
+  count(sample_id, sort = TRUE) %>%
+  filter(!is.na(sample_id), n > 1)
+
+n_tumor <- sum(metadata_tissue_values == "tumor", na.rm = TRUE)
+n_tumor_matched <- sum(metadata_tissue_values == "tumor" & metadata_matched_values == "yes", na.rm = TRUE)
+n_premalignant <- sum(metadata_tissue_values == "premalignant", na.rm = TRUE)
+n_premalignant_matched <- sum(metadata_tissue_values == "premalignant" & metadata_matched_values == "yes", na.rm = TRUE)
+n_normal <- sum(metadata_tissue_values == "normal", na.rm = TRUE)
+```
+
+```{r metadata-metrics-show}
+# Assemble metadata QC metrics into a compact summary table.
+metadata_summary <- tibble(
+  metric = c(
+    "Total rows in metadata",
+    "Unique sample IDs",
+    "Matched samples",
+    "Tumor samples",
+    "Tumor matched samples",
+    "Premalignant samples",
+    "Premalignant matched samples",
+    "Normal samples"
+  ),
+  value = c(
+    total_metadata_rows,
+    total_unique_samples,
+    matched_samples_n,
+    n_tumor,
+    n_tumor_matched,
+    n_premalignant,
+    n_premalignant_matched,
+    n_normal
+  )
+)
+
+metadata_summary
+```
+
+### Duplicated sample IDs in metadata
+
+```{r metadata-duplicates}
+# Report duplicate sample IDs, if any are present.
+if (nrow(sample_duplicates) == 0) {
+  cat("No duplicated sample IDs were found in the metadata table.\n")
+} else {
+  kable(sample_duplicates, caption = "Duplicated sample IDs in metadata")
+}
+```
+
+### Coverage and contamination checks
+
+Identify tumor and premalignant samples that do not pass coverage or
+contamination thresholds.
+
+```{r coverage-contamination-checks}
+# Samples failing coverage threshold.
+low_coverage_samples <- low_coverage %>%
+  pull(sample) %>%
+  unique()
+
+# Samples failing contamination threshold.
+contamination_samples <- contamination %>%
+  filter(contamination > 0.05) %>%
+  pull(sample) %>%
+  unique()
+
+cat(  "Low coverage samples are:",
+  paste(low_coverage_samples, collapse = ", "),
+  "\n" )
+
+cat(  "Samples with contamination > 0.05 are:",
+  paste(contamination_samples, collapse = ", "),
+  "\n")
+
+samples_not_passing_tum_prem <- unique(c(
+  low_coverage_samples,
+  contamination_samples ))
+
+cat(  "Samples not passing coverage and/or contamination thresholds are:",
+  paste(samples_not_passing_tum_prem, collapse = ", "),
+  "\n" )
+```
+
+If for any reason, we want to exclude any sample_id... : 
+`AS9750` was manually removed because it is hypermutated, so it is removed from
+the list of passing samples without filtered variants.
+
+```{r}
+# Define manual sample exclusions.
+exclude_sample_id <- c()
+exclude_sample_id <- unique(c(exclude_sample_id, "AS9750"))
+
+# Combine automatic failing samples and manually excluded samples.
+samples_not_passing_all <- unique(c(
+  samples_not_passing_tum_prem,
+  exclude_sample_id ))
+
+# Samples passing = non-normal samples not in failing/excluded list
+metadata_passing <- metadata_pscc %>%
+  filter(
+    tolower(.data[[tissue_col]]) != "normal",
+    !.data[[sample_col]] %in% samples_not_passing_all )
+
+# Samples not passing = normal samples + failing/excluded tumor/premalignant samples
+metadata_not_passing <- metadata_pscc %>%
+  filter(
+    tolower(.data[[tissue_col]]) == "normal" |
+      .data[[sample_col]] %in% samples_not_passing_all )
+
+# Tumor samples not passing
+tumor_not_passing_samples <- metadata_not_passing %>%
+  filter(tolower(.data[[tissue_col]]) == "tumor") %>%
+  pull(.data[[sample_col]]) %>%
+  unique()
+
+# Premalignant samples not passing
+premalignant_not_passing_samples <- metadata_not_passing %>%
+  filter(tolower(.data[[tissue_col]]) == "premalignant") %>%
+  pull(.data[[sample_col]]) %>%
+  unique()
+```
+
+
+```{r}
+# Print sample IDs assigned to the non-passing group.
+cat("Tumor samples not passing are:",
+  paste(tumor_not_passing_samples, collapse = ", "),
+  "\n" )
+
+cat( "Premalignant samples not passing are:",
+  paste(premalignant_not_passing_samples, collapse = ", "),
+  "\n" )
+
+cat("All samples not passing are:")
+metadata_not_passing
+```
+
+### Passing samples with no filtered variants
+
+```{r passing-without-variants}
+# Compare passing metadata samples against samples represented in the variant table.
+passing_samples <- metadata_passing %>%
+  pull(.data[[sample_col]]) %>%
+  unique()
+
+samples_with_variants <- list_analyzed %>%
+  pull(sample_id) %>%
+  unique()
+
+passing_without_variants <- setdiff(
+  passing_samples,
+  samples_with_variants
+)
+
+if (length(passing_without_variants) > 0) {
+  for (s in passing_without_variants) {
+    cat(
+      "Sample",
+      s,
+      "passes coverage and contamination thresholds but has no filtered variants.\n"
+    )
+  }
+} else {
+  cat("All passing samples have filtered variants.\n")
+}
+```
+
+
+### Summary of filtered variants
+
+Summarize the filtered variant table and add any passing samples with no
+filtered variants.
+
+```{r filtered-variants-summary}
+# Count rows and unique samples in the filtered variant table.
+total_variant_rows <- nrow(list_analyzed)
+
+total_variant_samples <- n_distinct(list_analyzed$sample_id)
+
+variant_tumor_samples <- list_analyzed %>%
+  filter(tissue_type == "tumor") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+variant_premalignant_samples <- list_analyzed %>%
+  filter(tissue_type == "premalignant") %>%
+  summarise(n = n_distinct(sample_id)) %>%
+  pull(n)
+
+n_tumor_variants <- list_analyzed %>%
+  filter(tissue_type == "tumor") %>%
+  nrow()
+
+n_premalignant_variants <- list_analyzed %>%
+  filter(tissue_type == "premalignant") %>%
+  nrow()
+
+variant_summary <- tibble(
+  metric = c(
+    "Unique samples in filtered variants",
+    "Unique tumor samples in filtered variants",
+    "Unique premalignant samples in filtered variants",
+    "Total variant rows",
+    "Total tumor variants",
+    "Total premalignant variants"
+  ),
+  value = c(
+    total_variant_samples,
+    variant_tumor_samples,
+    variant_premalignant_samples,
+    total_variant_rows,
+    n_tumor_variants,
+    n_premalignant_variants
+  )
+)
+
+# Insert passing samples with no filtered variants into the summary table.
+if (length(passing_without_variants) > 0) {
+  rows_to_add <- tibble(
+    metric = paste0(
+      "Sample ",
+      passing_without_variants,
+      " passes but has no filtered variants"
+    ),
+    value = length(passing_without_variants)
+  )
+
+  variant_summary <- bind_rows(
+    variant_summary %>% slice(1:3),
+    rows_to_add,
+    variant_summary %>% slice(4:n())
+  )
+}
+
+variant_summary
+```

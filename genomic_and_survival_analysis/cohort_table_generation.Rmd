@@ -1,0 +1,98 @@
+---
+title: "cohort_table"
+author: "Elena Díaz"
+date: "2026-05-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Custom functions used in this notebook
+
+No custom functions are defined in this notebook. It uses `save_flextable_docx()`,
+which is created upstream, to export the final cohort table.
+
+# Workflow overview
+
+This script is explicity created to prepare the cohort table 
+All information for the rows has been taken from RedCap. Stored in oncomine_followup
+The three groups of the columns are taken from HPV_TP53_mutational_group from clinical_for_maf
+Doubt: all cohort or only the patients from whom we have data? We do not have genetic
+TP53 data from patients who are missing coverage/contamination
+- All cohort: p53 status by IHC
+- Only passing patients: tp53 genetic status can be used
+
+
+
+
+```{r}
+# Join REDCap follow-up variables with HPV/TP53 group annotations.
+cohort_table_all <- oncomine_followup %>%
+  select(study_id, age_calc, stage, hist_type, radiotherapy, chemotherapy,status_last_followup, recurrence, p53_ihc_status ) %>%
+rename(patient = study_id) %>%
+  left_join(clinical_for_maf %>% select(patient, HPV_TP53_mutational_group), by = "patient")
+  
+  cohort_table_all
+  
+```
+
+
+```{r}
+# Recode clinical variables and generate the grouped summary table.
+cohort <- cohort_table_all %>%
+  rename(age = age_calc) %>%
+  select(!c(patient)) %>%
+  filter(
+    stage != "0",
+    radiotherapy != "Unknown"
+  ) %>%
+  mutate(
+    stage = case_when(
+      stage %in% c("I", "II") ~ "Initial (I-II)",
+      stage %in% c("III", "IV") ~ "Advanced (III-IV)",
+      TRUE ~ stage
+    ),
+    hist_type = case_when(
+      hist_type %in% c("Basaloid", "Warty", "Nonkeratinizing") ~ 
+        "Basaloid/Warty/Nonkeratinizing",
+      hist_type %in% c("Usual", "Keratinizing", "Lymphoepithelioma-like", "Mixed") ~ 
+        "Usual/Keratinizing",
+      TRUE ~ hist_type
+    )
+  ) %>%
+  tbl_summary(
+              by = HPV_TP53_mutational_group, 
+              label = list( age ~ "Age", 
+                            stage ~ "Stage", 
+                            hist_type ~ "Histological Type"),
+              statistic = list(
+                            age ~ "{mean} ({min}–{max})",
+                            all_continuous() ~ "{mean} ({sd})", 
+                            all_categorical() ~ "{n} / {N} ({p}%)"
+                            ), 
+                             digits = list(
+                              age ~ 1,
+                              all_continuous() ~ 1,
+                               all_categorical() ~ c(0, 0, 1)
+    ),
+    missing = "no" ) %>%
+  add_p(test = list(all_continuous() ~ "kruskal.test", all_categorical() ~ "fisher.test")) %>%
+  bold_labels() %>%  add_overall() 
+
+cohort
+```
+
+
+```{r}
+# Export the cohort summary table to Word.
+save_flextable_docx(cohort, "cohort")
+```
+
+# Save the current R workspace for downstream notebooks.
+save.image(
+  file = "C:/Users/ediaz/pscc_project/2.filtering/my_scripts/maf_workspace.RData"
+)
+
+

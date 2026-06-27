@@ -1,0 +1,398 @@
+---
+title: "Changes in Server"
+author: "Elena Díaz"
+date: "2026-06-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Changes Introduced in `filter_variants.R`
+
+## Overview
+
+Modifications to improve somatic variant filtering in FFPE-derived tumor samples. The main objectives were:
+
+-   Increase flexibility of filtering criteria.
+-   Increase transparency and documentation of filtering decisions.
+
+------------------------------------------------------------------------
+
+# New Filtering Parameters
+
+## Minimum Depth Filter (`min_dp`)
+
+Added support for filtering variants by sequencing depth. Disabled by default
+
+### Behaviour
+
+Variants are removed when:
+
+``` r
+dp < min_dp
+```
+
+or when depth information is missing (`NA`).
+
+### Rationale
+
+Low-depth variants are more likely to represent sequencing noise and less reliable mutation calls.
+
+------------------------------------------------------------------------
+
+## Required Caller Presence (`required_caller_any`)
+
+Added a new optional filter allowing retention of variants detected by at least one caller from a user-defined list. Disabled by default
+
+### Behaviour
+
+Uses OR logic:
+
+``` text
+Mutect2 OR Strelka2 OR DeepSomatic ...
+```
+
+A variant is retained if any selected caller reported the event. If none of the specified caller columns are available, a warning is issued.
+
+### Rationale
+
+Allows prioritization of variants supported by specific callers while maintaining flexibility. Used in our lists to avoid passing variants whcih were only called by two callers (the two ones most permissive).
+
+------------------------------------------------------------------------
+
+## ClinVar Pathogenic Filter (`require_clinvar_pathogenic`)
+
+Added an optional ClinVar-based prioritization filter. Disabled by default
+
+### Behaviour
+
+When enabled:
+
+``` r
+require_clinvar_pathogenic = TRUE
+```
+
+only variants annotated as pathogenic or likely pathogenic in ClinVar are retained. Conflicting interpretations are excluded.
+
+### Rationale
+
+Provides a mechanism to generate highly conservative lists enriched for clinically validated variants. Finally, not used for our analysis.
+
+------------------------------------------------------------------------
+
+## COSMIC Cancer Gene Census Filter (`require_cosmic_cgc`)
+
+Added optional filtering based on COSMIC Cancer Gene Census annotations. Disabled by default.
+
+### Behaviour
+
+When enabled:
+
+``` r
+cosmic_cgc_v99 == "Yes"
+```
+
+### Rationale
+
+Allows prioritization of variants previously linked to cancer-associated genes curated by COSMIC. Finally, not used for our analysis.
+
+------------------------------------------------------------------------
+
+## COSMIC Identifier Filter (`require_cosmic_id`)
+
+Added optional filtering based on the presence of a valid COSMIC identifier. Disabled by default.
+
+### Behaviour
+
+Variants are retained only if:
+
+``` r
+!is.na(id) & id != "."
+```
+
+Used in the recovery strategy (List 2) to rescue previously reported cancer-associated variants.
+
+### Rationale
+
+Enriches variant lists for mutations already reported in cancer datasets.
+
+------------------------------------------------------------------------
+
+# Impact-Based Filtering Logic
+
+The impact filtering system was substantially redesigned.
+
+This step is applied after baseline caller support filters and introduces impact-specific requirements.
+
+------------------------------------------------------------------------
+
+## SNV Filtering
+
+### HIGH-impact SNVs
+
+Includes alterations such as stop gained, stop lost, essential splice variants
+
+Requirements:
+
+``` r
+num_callers >= min_callers_high_impact
+```
+
+For tumor-only samples:
+
+``` r
+num_callers >= min_callers_high_impact_tumor_only
+```
+
+### MODERATE-impact SNVs
+
+Primarily missense variants.
+
+Requirements:
+
+-   dbNSFP annotation available.
+-   Deleteriousness support from prediction tools.
+
+``` r
+num_damaging >= min_damaging
+```
+
+The damaging vote is calculated using Prediction-based tools, Score-based tools, Phred-based score (13): SIFT, SIFT4G, PolyPhen2 HDIV, PolyPhen2 HVAR, MutationTaster, MutationAssessor, PROVEAN, MetaSVM, ClinPred, REVEL, MutScore, DANN, CADD
+
+Caller requirements:
+
+``` text
+Matched samples    → min_callers
+Tumor-only samples → min_callers_tumor_only
+```
+
+### LOW and MODIFIER SNVs
+
+Excluded from analysis.
+
+------------------------------------------------------------------------
+
+## INDEL Filtering
+
+A dedicated filtering strategy was introduced for coding INDELs.
+
+Activated through:
+
+``` r
+treat_coding_indels_as_high = TRUE
+```
+
+### HIGH-impact INDELs
+
+Retained when supported by:
+
+``` r
+num_callers >= min_callers_high_impact
+```
+
+### MODERATE, LOW and MODIFIER INDELs
+
+Excluded.
+
+### Rationale
+
+INDELs lack dbNSFP annotations and therefore cannot be evaluated using deleteriousness prediction consensus. Caller agreement becomes the only quality metric.
+
+This approach prioritizes high-confidence coding INDELs while minimizing FFPE-related artefacts.
+
+------------------------------------------------------------------------
+
+## Reporting and Filtering Diagnostics
+
+To improve traceability and facilitate filtering optimization, additional reporting functionality was implemented.
+
+### Coverage Export (`export_coverage`)
+
+Added support for exporting sample-level coverage metrics, including mean coverage, sample identifier and other metadata. These reports facilitate exploratory QC analyses.
+
+### Contamination Export (`export_contamination`)
+
+Added support for exporting contamination statistics for all analyzed samples, including Sample identifier, estimated contamination level and more metadata.
+
+This information is useful for evaluating contamination thresholds and assessing their impact on sample retention.
+
+### Enhanced Filtering Logs
+
+Filtering messages (in logs) were expanded to report the samples failing each filtering criterion.
+
+Example information reported includes:
+
+-   Number of excluded samples
+-   Number of removed variants
+-   Sample IDs failing contamination filters
+-   Sample IDs failing coverage filters
+-   Remaining variants after each filtering step
+
+### Rationale
+
+These additions were implemented to improve transparency and reproducibility of the filtering process, facilitate threshold optimization and provide detailed trails during exploratory analyses and pipeline validation.
+
+------------------------------------------------------------------------
+
+# Documentation Improvements
+
+## `require_cancer_gene`
+
+Additional documentation was added to clarify the origin and interpretation of the `cgc_gene` annotation.
+
+When enabled:
+
+``` r
+variant_data <- variant_data[cgc_gene == TRUE]
+```
+
+Only variants occurring in known cancer genes are retained.
+
+### Annotation Source
+
+The `cgc_gene` annotation originates from the Cancer Gene Census (CGC), incorporated into the project's compiled cancer gene resources.
+
+The CGC is part of the COSMIC database and represents a manually curated catalogue of genes with strong evidence of causal involvement in human cancer.
+
+### Rationale
+
+The CGC represents a conservative, high-confidence set of cancer-associated genes and provides biological prioritization beyond purely technical filtering criteria.
+
+------------------------------------------------------------------------
+
+## Summary of Main Additions
+
+| Feature                               | Status     |
+|---------------------------------------|------------|
+| `min_dp` depth filtering              | Added      |
+| `required_caller_any`                 | Added      |
+| `require_clinvar_pathogenic`          | Added      |
+| `require_cosmic_cgc`                  | Added      |
+| `require_cosmic_id`                   | Added      |
+| Tumor-only specific caller thresholds | Added      |
+| Impact-specific filtering logic       | Redesigned |
+| Dedicated INDEL filtering strategy    | Added      |
+| CGC documentation and provenance      | Added      |
+| Contamination and coverage exports    | Added      |
+| Expanded inline documentation         | Added      |
+
+# Changes introduced in `submit_reports.sh`
+
+## HPC Submission Scripts
+
+### Updated SLURM Partition Configuration
+
+Submission scripts were updated to use the `long` partition:
+
+``` bash
+#SBATCH --partition=long
+```
+
+This change was introduced after jobs started failing in the previous partition configuration (observed 05/05/2026), likely due to changes in HPC administration or cluster resource allocation.
+
+Important note: When runned it generate folders data and plots in output. To avoid mistakes when rerunning, final filtering data was moved to output/list38.
+
+# Changes Introduced in `reports_list12.R`
+
+## Overview
+
+This script was primarily used during the refinement and validation of the somatic variant filtering strategy. Most modifications involved iterative adjustment of filtering thresholds.
+
+------------------------------------------------------------------------
+
+## Intermediate Filtered Variant Lists
+
+Added support for generating and storing intermediate filtering outputs as compressed `fst` files:
+
+-   `filtered_variants_list1.fst`
+-   `filtered_variants_list2.fst`
+
+### Rationale
+
+Saving intermediate results significantly reduced run-time during filter optimization, allowing rapid testing of downstream filtering strategies without re-running the entire pipeline. Also facilitates comparison of stringent and recovery filtering approaches.
+
+------------------------------------------------------------------------
+
+## Combined Variant Reporting
+
+Developed `reports38.R` to integrate and compare variants retained in both filtering strategies.
+
+### Functionality
+
+-   Loads List 1 and List 2 filtered variants.
+-   Removes recurrent artefacts observed in 5 or more samples.
+-   Combines results into a unified reporting framework.
+-   Generates summary statistics from this merged filtered_variants file.
+
+### Rationale
+
+Provided a centralized workflow to evaluate the impact of filtering decisions and compare alternative prioritization strategies.
+
+------------------------------------------------------------------------
+
+## Filtering Threshold Optimization
+
+This script served as the main environment for iterative filtering refinement of thresholds.
+
+### Outcome
+
+The final filtering strategy was selected based on a combination of technical robustness, biological plausibility and consistency with known cancer-associated genes.
+
+# Changes Introduced in `qc_report.R`
+
+## Overview
+
+This script was updated to improve quality control assessment of WES data, particularly for FFPE-derived samples, by revising QC warning thresholds.
+
+------------------------------------------------------------------------
+
+## Updated QC Thresholds
+
+### Duplication Rate Thresholds
+
+### Changes
+
+-   Increased the maximum acceptable duplication rate (`THRESHOLD_DUPLICATION_MAX`).
+-   Relaxed warning and failure categories compared with previous versions.
+
+### Rationale
+
+High duplication rates are common in FFPE samples due to DNA fragmentation and reduced library complexity. The previous thresholds generated excessive fails and did not accurately reflect sequencing data quality.
+
+------------------------------------------------------------------------
+
+### Transition/Transversion Ratio (Ts/Tv)
+
+### Rationale
+
+The original thresholds were more appropriate for WGS. The ones updated are more appropiate for WES data.
+
+------------------------------------------------------------------------
+
+## HTML Reporting Improvements
+
+V3 included the changes performed
+
+### Benefits
+
+-   More accurate interpretation of WES quality metrics.
+-   Reduced false-positive QC warnings.
+-   Easier identification of genuinely problematic samples.
+
+# Pipeline Reproducibility Improvements
+
+## Conda Environment Standardization
+
+Several scripts contained different approaches for Conda environment activation, resulting from historical development of the pipeline. This inconsistency occasionally caused environment initialization issues and reduced reproducibility across execution environments.
+
+### Changes Implemented
+
+-   Use the same environment initialization procedure.
+-   Follow a consistent activation workflow.
+-   Ensure compatibility across interactive sessions, SLURM jobs, and batch executions.
+
+## Minor Bug Fixes and Maintenance
+
+Several small bugs and inconsistencies were corrected during pipeline development. These changes did not modify the biological interpretation of results but improved overall robustness and reproducibility of the workflow.

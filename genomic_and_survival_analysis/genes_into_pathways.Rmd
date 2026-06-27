@@ -1,0 +1,608 @@
+---
+title: "Pathway-Level Mutation Burden"
+author: "Elena Diaz"
+date: "2026-05-11"
+output: html_document
+---
+
+# Custom functions defined in this notebook
+
+- `make_pairwise_pathway_boxplots()`: builds pathway-level boxplots and
+  Wilcoxon summary tables for a specified two-group comparison.
+
+# Custom functions and objects used from upstream notebooks
+
+- `maf_tumor`: tumor-only MAF object used for pathway oncoplots and mutation
+  counts.
+- `clinical_for_maf`: clinical annotation table used to assign samples to
+  HPV/TP53 groups.
+- `ordered_samples`: sample order created upstream for grouped oncoplots.
+- `oncoplot_ann_colors`: annotation color list used by the pathway oncoplots.
+- `group_order`: fixed HPV/TP53 group order used in pathway boxplots.
+
+# Workflow Documentation
+
+## Purpose
+
+This notebook assigns recurrently mutated tumor genes to functional pathways.
+
+We have threee pathways lists:
+1&2. The easiest with sigpw, smgbp which are a oncogenic signalling pathwat and a catalog
+of known genes classified by their biological processes.
+3. Using the list provided by Robert
+
+The representations will be sample ordered by HPB_TP53_groups, to check if there is any conclusion
+- `HPVA`
+- `HPVI TP53-mutated`
+- `HPVI TP53-wild-type`
+Then we go for grouping by nº of mutations per pathway
+
+It uses `maftools::oncoplot()` to display pathway annotations on the tumor MAF
+and then creates one boxplot per pathway with Kruskal-Wallis tests across
+`HPV_TP53_mutational_group`.
+
+## Required Previous Steps
+
+Run these files first in the same R session:
+
+1. `1upload_to_R.Rmd initial_sample_checks.Rmd`
+3. `3tp53_ihc_variants.Rmd`
+4. `4merged_oncoplot_workflow.Rmd`
+
+## Required Objects in the R Environment
+
+This notebook expects the following objects from the previous workflow:
+
+- `maf_tumor`: tumor-only MAF object created in `4merged_oncoplot_workflow.Rmd`.
+- `clinical_for_maf`: tumor-only clinical annotation table.
+- `oncoplot_ann_colors`: optional color list for the clinical annotations. If it
+  is missing, local fallback colors are used.
+
+## Required File on Disk
+
+The pathway annotation file must be available here:
+
+`C:/Users/ediaz/pscc_project/server/pathways/gene_annotations_recurrence_3.xlsx`
+
+It must contain the columns `Gene` and `Pathway2`.
+
+
+# 1. Setup
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Recurrent Genes Used for Pathway Counts
+
+The analysis is restricted to recurrent tumor genes mutated in at least 3
+samples. This matches the gene set shown in the pathway oncoplot and the genes
+appearing in Robert_pathway dataset.
+
+```{r recurrent-genes}
+# Identify recurrent tumor genes mutated in at least three samples.
+gene_summary <- getGeneSummary(maf_tumor) %>%
+  as_tibble()
+
+recurrent_genes <- gene_summary %>%
+  filter(MutatedSamples >= 3) %>%
+  arrange(desc(MutatedSamples)) %>%
+  pull(Hugo_Symbol)
+
+length(recurrent_genes)
+recurrent_genes
+```
+
+# 2. Load Pathway Annotation
+
+```{r load-pathways}
+# Load Robert pathway annotations for the recurrent gene set.
+pathway_file <- "C:/Users/ediaz/pscc_project/server/pathways/gene_annotations_recurrence_3.xlsx"
+Robert_pathways <- read_excel(pathway_file) %>%
+  select(
+    gene,
+    general_category)
+#as this list is taken exactly for my genes, this table provides info of my gene cohort
+Robert_pathways %>%
+  count(general_category, name = "n_genes") %>%
+  arrange(desc(n_genes))
+```
+
+# Grouping by pathways
+The simplest plot using each of the pathway databases from maftools:
+- oncogenic signalling pathways: A curated list of 10 signalling pathways
+- Catalog of 10 known driver genes classified by their biological processes
+- For the Robert_Database we have 11 gene categories
+For the two first plt0s we set top 84 genes that is the number for recurrence => 3
+
+
+# Adding order by HPV_TP53_mutational_group
+Now we plot the same but grouping the samples (x axis) by annotation of HPV_TP53_mutational_group. 
+
+Now we plot the three oncoplots by ordering samples by HPVA, HPVi-TP53mut,  HPVi-TP53wt
+```{r, fig.width=16, fig.height=12, dpi=300, fig.retina=2}
+# Plot pathway annotations using the maftools sigpw database.
+genes_pathways_sigpw <- oncoplot(maf= maf_tumor, pathways = "sigpw", gene_mar =8, fontSize=0.6, topPathways= 10, top = 84, 
+        sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = FALSE,
+        showTumorSampleBarcodes = TRUE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        annotationFontSize = 1.1,
+        legendFontSize = 0.9,
+        titleFontSize = 1.3,
+        SampleNamefontSize = 0.75)
+
+# Plot pathway annotations using the maftools smgbp database.
+genes_pathways_smgbp <- oncoplot(maf= maf_tumor, pathways = "smgbp", gene_mar =8, fontSize=0.4, topPathways= 10, top = 84,
+        sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = FALSE,
+        showTumorSampleBarcodes = TRUE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        annotationFontSize = 0.5,
+        legendFontSize = 0.9,
+        titleFontSize = 1.3,
+        SampleNamefontSize = 0.5)
+
+# Plot pathway annotations using Robert pathway categories.
+genes_pathways_rob <- oncoplot(maf= maf_tumor, pathways = Robert_pathways, gene_mar =8, fontSize=0.5,topPathways= 11, 
+        top = 84, sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = FALSE,
+        showTumorSampleBarcodes = TRUE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        annotationFontSize = 1.1,
+        legendFontSize = 0.9,
+        titleFontSize = 1.3,
+        SampleNamefontSize = 0.75)
+
+genes_pathways_sigpw
+#genes_pathways_smgbp
+#genes_pathways_rob
+```
+
+# Grouping by pathways &  number of mutations per pathway
+We first plot the same plot as first and add collapsePathway.
+
+Adding to this representation the differenciation between groups HPV-TP53.
+This is chunck 8 adding , collapsePathway = TRUE, sortByAnnotation = TRUE,
+```{r}
+# Collapse sigpw genes into pathway-level mutation rows.
+pathways_sigpw <- oncoplot(maf= maf_tumor, pathways = "sigpw", gene_mar =8, fontSize=0.6, topPathways= 10, top = 84, 
+        sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = TRUE,
+        showTumorSampleBarcodes = FALSE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        barcode_mar = 5,
+        anno_height = 0.5, 
+        collapsePathway = TRUE)
+
+# Collapse smgbp genes into pathway-level mutation rows.
+pathways_smgbp <- oncoplot(maf= maf_tumor, pathways = "smgbp", gene_mar =4, fontSize=0.6, topPathways= 10, top = 84,
+        sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = TRUE,
+        showTumorSampleBarcodes = TRUE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        annotationFontSize = 1.1,
+        legendFontSize = 0.9,
+        titleFontSize = 1.3,
+        SampleNamefontSize = 0.75, collapsePathway = TRUE)
+
+# Collapse Robert categories into pathway-level mutation rows.
+pathways_rob <- oncoplot(maf= maf_tumor, pathways = Robert_pathways, gene_mar =4, fontSize=0.5,topPathways= 11, 
+        top = 84, sampleOrder = ordered_samples,
+        clinicalFeatures = c("HPV_TP53_mutational_group"),
+        sortByAnnotation = TRUE,
+        showTumorSampleBarcodes = TRUE,
+        removeNonMutated = FALSE,
+        annotationColor = oncoplot_ann_colors,
+        annotationFontSize = 1.1,
+        legendFontSize = 0.9,
+        titleFontSize = 1.3,
+        SampleNamefontSize = 0.75, collapsePathway = TRUE)
+
+pathways_sigpw
+#pathways_smgbp
+#pathways_rob
+
+```
+
+
+# 3. Pathway Boxplot Workflow
+
+The sections below merge the pathway boxplot workflow from `9boxplot_pathways_sigpw.Rmd` into this notebook. The code still uses the internal Sanchez-Vega signalling pathway database used by `maftools` when `pathways = "sigpw"`.
+
+# 3.1 Groups and colors
+
+These are the three groups used in the comparison. Keeping the order
+fixed makes the tables and plots easier to read.
+
+```{r groups-and-colors}
+# Define fixed colors for the three HPV/TP53 groups.
+group_colors <- c(
+  "HPV-A" = "#377EB8",
+  "HPV-I/TP53mut" = "#E69F00",
+  "HPV-I/TP53wt" = "#009E73"
+)
+
+# Keep only the sample barcode and group columns used in pathway comparisons.
+sample_groups <- clinical_for_maf %>%
+  select(Tumor_Sample_Barcode, HPV_TP53_mutational_group) %>%
+  mutate(
+    HPV_TP53_mutational_group = factor(
+      HPV_TP53_mutational_group,
+      levels = group_order #from 4maf_obj
+    )
+  )
+```
+
+# 3.2 Load maftools sigpw pathways
+
+`maftools::oncoplot(pathways = "sigpw")` does not require a
+user-provided pathway table. In this installed version of `maftools`,
+`sigpw` is not exposed as a normal `data("sigpw")` object; it is stored
+as an internal TSV file in the package `extdata` directory.
+
+The chunk below reads the same internal TSV file used by `maftools`.
+The final table is converted to the same two-column format expected by the old
+workflow: `gene` and
+`general_category`.
+
+```{r load-sigpw-pathways}
+# Load internal maftools signalling pathways database (sigpw)
+sigpw_file <- system.file(
+  "extdata",
+  "oncogenic_sig_patwhays.tsv",
+  package = "maftools"
+)
+
+sigpw_pathways <- read.delim(sigpw_file) %>%
+  dplyr::transmute(
+    gene = Gene,
+    general_category = Pathway
+  )
+
+# Count how many database genes are assigned to each pathway.
+sigpw_pathways %>%
+  count(general_category, name = "n_genes") %>%
+  arrange(desc(n_genes))
+```
+
+# 3.3 Mutation counts per sample and pathway
+
+Each mutation row in `maf_tumor@data` is joined to its pathway using
+`Hugo_Symbol`. `sigpw` can contain a gene in more than one pathway, so
+each gene-pathway row is kept and contributes to the corresponding
+pathway count.
+
+Samples with no mutation in a pathway are kept with `Num_Mutations = 0`.
+This is important because every pathway is compared using the same
+sample set.
+
+`general_category` stores the `sigpw` pathway name.
+
+```{r pathway-counts}
+# Match tumor mutation records to sigpw pathway annotations.
+mutated_sample_pathways <- maf_tumor@data %>%
+  as_tibble() %>%
+  select(Tumor_Sample_Barcode, Hugo_Symbol) %>%
+  inner_join(sigpw_pathways, by = c("Hugo_Symbol" = "gene")) %>%
+  filter(general_category %in% sigpw_pathways$general_category)
+
+# Build a complete sample-by-pathway grid so zero-count pathways are retained.
+sample_pathway_grid <- expand.grid(
+  Tumor_Sample_Barcode = sample_groups$Tumor_Sample_Barcode,
+  general_category = unique(sigpw_pathways$general_category),
+  stringsAsFactors = FALSE
+) %>%
+  as_tibble() %>%
+  left_join(sample_groups, by = "Tumor_Sample_Barcode")
+
+# Count mutation records per sample and pathway.
+pathway_counts <- mutated_sample_pathways %>%
+  count(Tumor_Sample_Barcode, general_category, name = "Num_Mutations") %>%
+  right_join(sample_pathway_grid, by = c("Tumor_Sample_Barcode", "general_category")) %>%
+  mutate(
+    Num_Mutations = if_else(is.na(Num_Mutations), 0L, Num_Mutations),
+    HPV_TP53_mutational_group = factor(
+      HPV_TP53_mutational_group,
+      levels = group_order
+    )
+  ) %>%
+  select(
+    Tumor_Sample_Barcode,
+    HPV_TP53_mutational_group,
+    general_category,
+    Num_Mutations
+  )
+
+# Summarize total mutation counts by pathway.
+pathway_counts %>%
+  count(general_category, wt = Num_Mutations, name = "total_mutations") %>%
+  arrange(desc(total_mutations))
+```
+
+# 3.4 Boxplots and Kruskal-Wallis tests
+
+For each pathway, the boxplot shows the number of mutations per sample
+in each HPV/TP53 group. The Kruskal-Wallis test compares the three
+groups without assuming normal distributions.
+
+```{r pathway-boxplots, fig.width=12, fig.height=8, dpi=300}
+# Select pathways with at least one observed mutation.
+plot_pathways <- pathway_counts %>%
+  group_by(general_category) %>%
+  summarise(total_mutations = sum(Num_Mutations), .groups = "drop") %>%
+  filter(total_mutations > 0) %>%
+  arrange(desc(total_mutations)) %>%
+  pull(general_category)
+
+plots <- list()
+stats <- list()
+
+# Generate one boxplot and Kruskal-Wallis result per pathway.
+for (pathway_name in plot_pathways) {
+  data_summary <- pathway_counts %>%
+    filter(general_category == pathway_name)
+
+  kw_result <- kruskal.test(
+    Num_Mutations ~ HPV_TP53_mutational_group,
+    data = data_summary
+  )
+
+  stats[[pathway_name]] <- data.frame(
+    general_category = pathway_name,
+    p_value = kw_result$p.value
+  )
+
+  y_max <- max(data_summary$Num_Mutations)
+
+  plots[[pathway_name]] <- ggplot(
+    data_summary,
+    aes(
+      x = HPV_TP53_mutational_group,
+      y = Num_Mutations,
+      fill = HPV_TP53_mutational_group
+    )
+  ) +
+    geom_boxplot(alpha = 0.6, outlier.shape = NA, width = 0.55) +
+    geom_jitter(width = 0.12, size = 1.4, alpha = 0.8, shape = 21, color = "grey20") +
+    scale_fill_manual(values = group_colors, drop = FALSE) +
+    scale_y_continuous(breaks = seq(0, y_max + 1, by = 1)) +
+    labs(
+      title = paste("Pathway:", pathway_name),
+      x = NULL,
+      y = "Number of mutations"
+    ) +
+    annotate(
+      "text",
+      x = 2,
+      y = y_max + 0.8,
+      label = paste("KW p =", signif(kw_result$p.value, 3)),
+      size = 3
+    ) +
+    theme_classic(base_size = 10) +
+    theme(
+      legend.position = "none",
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(face = "bold", size = 9)
+    )
+}
+
+# Combine pathway-level p-values and apply BH correction.
+stats_table <- bind_rows(stats) %>%
+  mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+  arrange(p_adj)
+
+stats_table
+
+grid.arrange(grobs = plots, ncol = 3)
+```
+
+Two pathways show significant differences between groups after BH
+adjustment: - TP53 - NRF2
+
+# 3.5 Supplementary pairwise pathway comparisons
+
+The supplementary analyses below reuse the existing `pathway_counts`
+table and the same pathway-level variable, `Num_Mutations`. Because
+these are numeric pathway-level counts shown as boxplots, each two-group
+comparison uses a Wilcoxon rank-sum test, followed by Benjamini-Hochberg
+correction across pathways.
+
+```{r supplementary-pairwise-helper}
+# Helper used only for the supplementary pairwise pathway boxplots below.
+make_pairwise_pathway_boxplots <- function(
+  pathway_data,
+  comparison_col,
+  comparison_levels,
+  comparison_colors,
+  comparison_label
+) {
+  # Restrict pathway counts to the requested comparison groups.
+  pairwise_data <- pathway_data %>%
+    filter(.data[[comparison_col]] %in% comparison_levels) %>%
+    mutate(
+      comparison_group = factor(
+        .data[[comparison_col]],
+        levels = comparison_levels
+      )
+    )
+
+  # Keep only pathways with mutations in the selected comparison.
+  pairwise_pathways <- pairwise_data %>%
+    group_by(general_category) %>%
+    summarise(total_mutations = sum(Num_Mutations), .groups = "drop") %>%
+    filter(total_mutations > 0) %>%
+    arrange(desc(total_mutations)) %>%
+    pull(general_category)
+
+  pairwise_plots <- list()
+  pairwise_stats <- list()
+
+  # Create pathway-specific Wilcoxon tests and boxplots.
+  for (pathway_name in pairwise_pathways) {
+    data_summary <- pairwise_data %>%
+      filter(general_category == pathway_name)
+
+    group_counts <- table(data_summary$comparison_group)
+
+    if (length(group_counts) == 2 && all(group_counts > 0)) {
+      wilcox_result <- wilcox.test(
+        Num_Mutations ~ comparison_group,
+        data = data_summary,
+        exact = FALSE
+      )
+      p_value <- wilcox_result$p.value
+    } else {
+      p_value <- NA_real_
+    }
+
+    pairwise_stats[[pathway_name]] <- data.frame(
+      general_category = pathway_name,
+      comparison = comparison_label,
+      group_1 = comparison_levels[1],
+      group_2 = comparison_levels[2],
+      n_group_1 = unname(group_counts[comparison_levels[1]]),
+      n_group_2 = unname(group_counts[comparison_levels[2]]),
+      median_group_1 = median(
+        data_summary$Num_Mutations[data_summary$comparison_group == comparison_levels[1]],
+        na.rm = TRUE
+      ),
+      median_group_2 = median(
+        data_summary$Num_Mutations[data_summary$comparison_group == comparison_levels[2]],
+        na.rm = TRUE
+      ),
+      p_value = p_value
+    )
+
+    y_max <- max(data_summary$Num_Mutations)
+
+    pairwise_plots[[pathway_name]] <- ggplot(
+      data_summary,
+      aes(
+        x = comparison_group,
+        y = Num_Mutations,
+        fill = comparison_group
+      )
+    ) +
+      geom_boxplot(alpha = 0.6, outlier.shape = NA, width = 0.55) +
+      geom_jitter(width = 0.12, size = 1.4, alpha = 0.8, shape = 21, color = "grey20") +
+      scale_fill_manual(values = comparison_colors, drop = FALSE) +
+      scale_y_continuous(breaks = seq(0, y_max + 1, by = 1)) +
+      labs(
+        title = paste("Pathway:", pathway_name),
+        x = NULL,
+        y = "Number of mutations"
+      ) +
+      annotate(
+        "text",
+        x = 1.5,
+        y = y_max + 0.8,
+        label = paste("Wilcoxon p =", signif(p_value, 3)),
+        size = 3
+      ) +
+      theme_classic(base_size = 10) +
+      theme(
+        legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1),
+        plot.title = element_text(face = "bold", size = 9)
+      )
+  }
+
+  # Combine pairwise statistics and apply BH correction.
+  pairwise_stats_table <- bind_rows(pairwise_stats) %>%
+    mutate(p_adj = p.adjust(p_value, method = "BH")) %>%
+    arrange(p_adj)
+
+  list(
+    plots = pairwise_plots,
+    stats = pairwise_stats_table
+  )
+}
+```
+
+# 3.6 Supplementary: HPVi vs HPVa pathway boxplots
+
+This comparison collapses the two HPV-independent TP53 subgroups into
+one `HPVi` group and compares it against the HPV-associated `HPVa`
+group.
+
+```{r supplementary-hpvi-vs-hpva, fig.width=12, fig.height=8, dpi=300}
+# Collapse HPV-independent TP53 subgroups into one HPV-I comparison group.
+pathway_counts_HPVi_vs_HPVa <- pathway_counts %>%
+  mutate(
+    HPV_status_pairwise = case_when(
+      HPV_TP53_mutational_group == "HPV-A" ~ "HPV-A",
+      HPV_TP53_mutational_group %in% c(
+        "HPV-I/TP53mut", "HPV-I/TP53wt") ~ "HPV-I",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(HPV_status_pairwise))
+
+# Build HPV-I versus HPV-A pathway plots and statistics.
+pathway_pairwise_HPVi_vs_HPVa_result <- make_pairwise_pathway_boxplots(
+  pathway_data = pathway_counts_HPVi_vs_HPVa,
+  comparison_col = "HPV_status_pairwise",
+  comparison_levels = c("HPV-I", "HPV-A"),
+  comparison_colors = c(
+    "HPV-I" = "#E69F00",
+    "HPV-A" = "#377EB8"
+  ),
+  comparison_label = "HPV-I vs HPV-A"
+)
+
+pathway_boxplots_HPVi_vs_HPVa <- pathway_pairwise_HPVi_vs_HPVa_result$plots
+pathway_pairwise_HPVi_vs_HPVa <- pathway_pairwise_HPVi_vs_HPVa_result$stats
+
+pathway_pairwise_HPVi_vs_HPVa
+
+grid.arrange(grobs = pathway_boxplots_HPVi_vs_HPVa, ncol = 3)
+```
+
+# 3.7 Supplementary: HPVi TP53 wild-type vs HPVi TP53-mutant pathway boxplots
+
+This comparison keeps only HPV-independent samples and compares TP53
+wild-type against TP53-mutant tumors.
+
+```{r supplementary-hpvi-tp53wt-vs-hpvi-tp53mut, fig.width=12, fig.height=8, dpi=300}
+# Keep only HPV-independent samples and define TP53-status comparison groups.
+pathway_counts_HPVi_TP53wt_vs_HPVi_TP53mut <- pathway_counts %>%
+  mutate(
+    HPVi_TP53_pairwise = case_when(
+      HPV_TP53_mutational_group == "HPV-I/TP53wt" ~ "HPV-I/TP53wt",
+      HPV_TP53_mutational_group == "HPV-I/TP53mut" ~ "HPV-I/TP53mut",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(HPVi_TP53_pairwise))
+
+# Build HPV-I TP53-wild-type versus TP53-mutant pathway plots and statistics.
+pathway_pairwise_HPVi_TP53wt_vs_HPVi_TP53mut_result <- make_pairwise_pathway_boxplots(
+  pathway_data = pathway_counts_HPVi_TP53wt_vs_HPVi_TP53mut,
+  comparison_col = "HPVi_TP53_pairwise",
+  comparison_levels = c("HPV-I/TP53wt", "HPV-I/TP53mut"),
+  comparison_colors = c(
+    "HPV-I/TP53wt" = "#009E73",
+    "HPV-I/TP53mut" = "#E69F00"
+  ),
+  comparison_label = "HPV-I/TP53wt vs HPV-I/TP53mut"
+)
+
+pathway_boxplots_HPVi_TP53wt_vs_HPVi_TP53mut <- pathway_pairwise_HPVi_TP53wt_vs_HPVi_TP53mut_result$plots
+pathway_pairwise_HPVi_TP53wt_vs_HPVi_TP53mut <- pathway_pairwise_HPVi_TP53wt_vs_HPVi_TP53mut_result$stats
+
+pathway_pairwise_HPVi_TP53wt_vs_HPVi_TP53mut
+
+grid.arrange(grobs = pathway_boxplots_HPVi_TP53wt_vs_HPVi_TP53mut, ncol = 3)
+```
+
